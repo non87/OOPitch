@@ -711,7 +711,7 @@ class Match:
                     figobjs.append(objs)
                 # include match time at the top
                 frame_minute = int(frame / (60 * 25))
-                frame_second = np.floor((frame / (60 * 25) - frame_minute) * 60.)
+                frame_second = np.int_( np.floor((frame / (60 * 25) - frame_minute) * 60.))
                 timestring = f"{frame_minute}:{frame_second}"
                 objs = ax.text(-2.5, field_dimen[1] / 2. + 1., timestring, fontsize=14)
                 figobjs.append(objs)
