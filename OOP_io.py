@@ -12,6 +12,7 @@ import numpy as np
 from shapely_footbal import Point
 from OOPitch import Player, Ball, Pitch, Match
 import matplotlib.pyplot as plt
+import urllib
 from shapely.affinity import affine_transform, rotate
 
 meters_per_yard = 0.9144  # unit conversion from yards to meters
@@ -63,30 +64,44 @@ def read_metrica_tracking(data_path, teamname, get_ball=True, pitch_dim=(106, 68
     '''
     read Metrica tracking data for game_id and return as a list of Player (and Ball) objects.
 
-    :param data_path: str (or valid path). Where is the tracking data
+    :param data_path: str (or valid path). Where is the tracking data. Can also be url to the data (no parameters can
+        be passed in the request).
     :param teamname: str. What team is the data about?
     :param get_ball: Boolean. Whether the ball data should be used to create a Ball object or ignored.
     :return: A list containing Player objects and a Ball object. No guarantee on the order of the objects in the list.
     '''
-    # First:  deal with file headers so that we can get the player names correct
-    with open(data_path, 'r') as csvfile:
+    try:
+        csvfile = open(data_path, 'r')
         reader = csv.reader(csvfile)
-        teamnamefull = next(reader)[3].lower()
-        print("Reading team: %s" % teamname)
-        # construct column names
-        jerseys = [x for x in next(reader) if x != '']  # extract player jersey numbers from second row
-        columns = next(reader)
-        # Keep track of the x-y couples of columns
-        columns_couples = {'ball': ['ball_x', 'ball_y']}  # column headers for the x & y positions of the ball
-        for i, j in enumerate(jerseys):  # create x & y position column headers for each player
-            base = "{}_{}".format(teamname, j)
-            x_name = "_".join([base, "x"])
-            y_name = "_".join([base, "y"])
-            columns[i * 2 + 3] = x_name
-            columns[i * 2 + 4] = y_name
-            columns_couples[base] = [x_name, y_name]
-        columns[-2] = columns_couples['ball'][0]
-        columns[-1] = columns_couples['ball'][1]
+        local = True
+    except FileNotFoundError:
+        try:
+            dt = urllib.request.urlopen(data_path)
+            # Decode first 3 rows
+            lines = [dt.readline().decode('utf-8') for i in range(3)]
+            reader = csv.reader(lines)
+            local = False
+        except urllib.error.URLError:
+            raise FileNotFoundError(f'No file at {data_path}')
+    # First:  deal with file headers so that we can get the player names correct
+    print(f"Reading team: {teamname}")
+    # We don't do much with this, but still need to get the first row out
+    teamnamefull = next(reader)[3].lower()
+    # construct column names
+    jerseys = [x for x in next(reader) if x != '']  # extract player jersey numbers from second row
+    columns = next(reader)
+    if local: csvfile.close()
+    # Keep track of the x-y couples of columns
+    columns_couples = {'ball': ['ball_x', 'ball_y']}  # column headers for the x & y positions of the ball
+    for i, j in enumerate(jerseys):  # create x & y position column headers for each player
+        base = "{}_{}".format(teamname, j)
+        x_name = "_".join([base, "x"])
+        y_name = "_".join([base, "y"])
+        columns[i * 2 + 3] = x_name
+        columns[i * 2 + 4] = y_name
+        columns_couples[base] = [x_name, y_name]
+    columns[-2] = columns_couples['ball'][0]
+    columns[-1] = columns_couples['ball'][1]
     # Second: read in tracking data and place into pandas Dataframe
     tracking = pd.read_csv(data_path, names=columns, index_col='Frame', skiprows=3)
     # Check when the Periods starts. Takes into account possible overtime
@@ -123,7 +138,7 @@ def read_metrica_tracking(data_path, teamname, get_ball=True, pitch_dim=(106, 68
             players.append(Player(couple_name, teamname, number=couple_name[-2:], positions=tracking[couple_name],
                                   hertz=metrica_hertz))
     # Need to do the ball as well
-    return tracking, period_change
+    return point_data, period_change
 
 
 def read_metrica_events(data_path, pitch_dim):
