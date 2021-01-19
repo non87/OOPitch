@@ -1,0 +1,11 @@
+name: OOPitch
+channels:
+  - defaults
+dependencies:
+  - pandas=1.1.5
+  - scipy=1.5.3
+  - shapely
+  - matplotlib
+  - geopandas=0.8.1
+  - descartes
+  - jupyter
