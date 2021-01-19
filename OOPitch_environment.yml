@@ -1,4 +1,4 @@
-name: football_analytics
+name: OOPitch
 channels:
   - defaults
 dependencies:
