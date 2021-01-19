@@ -9,7 +9,7 @@ Laurie Shaw  (@EightyFivePoint)
 import pandas as pd
 import csv as csv
 import numpy as np
-from shapely_footbal import Point
+from shapely_football import Point
 from OOPitch import Player, Ball, Pitch, Match
 import matplotlib.pyplot as plt
 import urllib
@@ -122,7 +122,7 @@ def read_metrica_tracking(data_path, teamname, get_ball=True, pitch_dim=(106, 68
             tracking[couple_name] = point_data
             # Fill a 2 seconds hole if needed // makes it robust to random missing data in the middle
             tracking[couple_name] = tracking[couple_name].fillna(method='bfill', limit=40)
-            players.append(Ball(couple_name, positions=tracking[couple_name], hertz=metrica_hertz))
+            players.append(Ball(positions=tracking[couple_name], hertz=metrica_hertz))
         elif couple_name == "ball":
             pass
         else:
@@ -138,7 +138,7 @@ def read_metrica_tracking(data_path, teamname, get_ball=True, pitch_dim=(106, 68
             players.append(Player(couple_name, teamname, number=couple_name[-2:], positions=tracking[couple_name],
                                   hertz=metrica_hertz))
     # Need to do the ball as well
-    return point_data, period_change
+    return players, period_change
 
 
 def read_metrica_events(data_path, pitch_dim):

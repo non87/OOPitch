@@ -5,11 +5,10 @@ to account for the necessities of football analytics.
 
 '''
 
-from shapely_footbal import SubPitch
 import numpy as np
 from scipy.signal import savgol_filter
-from shapely.geometry import Polygon
-from shapely_footbal import Point
+from shapely.geometry import Polygon, LineString
+from shapely_football import Point, SubPitch
 # We use geopandas most as a plotter. This will go away in more mature versions
 import geopandas as gpd
 import pandas as pd
@@ -30,7 +29,7 @@ class ObejctOnPitch:
         self.__id = id
         # Set positions
         if positions is not None:
-            if hertz is None: raise ValueError("If positions is specified, you need to indicate Hertz as well.")
+            if hertz is None: raise ValueError("If positions is specified, you need to indicate hertz as well.")
             self.create_positions(positions)
             self.calculate_velocities(hertz, smoothing=smoothing, filter_=filter_, window_length=window_length,
                                       max_speed=max_speed, **kwargs)
@@ -39,6 +38,8 @@ class ObejctOnPitch:
             self.__velocity = np.nan
             self.__smoothing = None
             self.__filter_par = None
+        self.__total_distance = np.nan
+
 
     def calculate_velocities(self, hertz, smoothing=True, filter_='Savitzky-Golay', window_length=7,
                              max_speed=12, **kwargs):
@@ -176,20 +177,50 @@ class ObejctOnPitch:
     def velocity(self):
         return (self.__velocity)
 
+    @property
+    def total_distance(self):
+        '''
+        Total distance covered in the match
+        '''
+        if np.isnan(self.__total_distance):
+            self.__total_distance = LineString(self.positions.to_list()).length
+        return(self.__total_distance)
+
+    def plot(self, frames, pitch = None, figax = None, color='red', player_marker_size=10, player_alpha=0.7):
+        '''
+        Plot the positions of a player over a pitch. Return the used axis if needed
+        :param frames: Which frames should be plotted
+        :param pitch: A Pitch object, where the player is moving
+        :param figax: A figure, axis couple. This is an alternative to the pitch
+        :param color: The color of the player's marker
+        :param player_marker_size: How big the marker should be
+        :param player_alpha: The alpha for the plaeyer marker
+        :return: The axis that has just been modified
+        '''
+        if pitch is None and figax is None:
+            raise AttributeError("Exactly one among pitch and figax must be specified")
+        if pitch is not None:
+            figax = pitch.plot()
+        fig, ax = figax
+        ax.text(self.__positions.loc[frames[0]].x + 0.5, self.__positions.loc[frames[0]].y + 0.5, self.__id,
+                          fontsize=10, color=color)
+        ax = self.__positions.loc[frames].plot(ax=ax, color=color, markersize=player_marker_size, alpha=player_alpha)
+        return ax
+
 
 class Player(ObejctOnPitch):
     '''
     Define players and all their methods/attributes
     '''
 
-    def __init__(self, id, team, number=None, positions=None, name=None, hertz=None,
+    def __init__(self, player_id, team, number=None, positions=None, name=None, hertz=None,
                  smoothing=True, filter_='Savitzky-Golay', window_length=7, max_speed=12, **kwargs):
-        super().__init__(id, positions=positions, hertz=hertz, smoothing=smoothing,
+        super().__init__(player_id, positions=positions, hertz=hertz, smoothing=smoothing,
                          filter_=filter_, window_length=window_length, max_speed=max_speed, **kwargs)
         self.__team = team
         # Set number
         if number is not None:
-            self.__couple_namenumber = number
+            self.__number = number
         else:
             self.__number = np.nan
         # Set name
@@ -198,7 +229,7 @@ class Player(ObejctOnPitch):
         else:
             self.__name = np.nan
         #Without data from other players it is impossible to know if a player is a GK
-        self.__is_goalkeepr = np.nan
+        self.__is_goalkeeper = np.nan
 
     @property
     def number(self):
@@ -218,12 +249,12 @@ class Player(ObejctOnPitch):
 
     @property
     def GK(self):
-        return self.__is_goalkeepr
+        return self.__is_goalkeeper
 
     @GK.setter
     def GK(self, value):
         if isinstance(True, bool):
-            self.__is_goalkeepr = value
+            self.__is_goalkeeper = value
         else:
             raise TypeError("The value of Player.GK is either True or False.")
 
@@ -233,9 +264,9 @@ class Ball(ObejctOnPitch):
     Define the ball and its property
     '''
 
-    def __init__(self, id, positions=None, hertz=None, smoothing=True, filter_='Savitzky-Golay', window_length=7,
+    def __init__(self, positions=None, hertz=None, smoothing=True, filter_='Savitzky-Golay', window_length=7,
                  max_speed=12, **kwargs):
-        super().__init__(id, positions=positions, hertz=hertz, smoothing=smoothing,
+        super().__init__('ball', positions=positions, hertz=hertz, smoothing=smoothing,
                          filter_=filter_, window_length=window_length, max_speed=max_speed, **kwargs)
 
 
@@ -317,6 +348,14 @@ class Pitch:
     @n_grid_cells_y.setter
     def n_grid_cells_y(self, n_grid_cells_y):
         raise NotImplementedError("At the moment, the only way to change the subpitch grid is to change n_grid_cells_x")
+    #
+    # @property
+    # def sub_pitch(self):
+    #     return(self.__subpitch)
+
+    @property
+    def sub_pitch_area(self):
+        return(np.round(self.__subpitch.iloc[0].area, 3))
 
     def plot(self, field_color='green', linewidth=2, markersize=20, fig_ax=None, grid=False, grid_alpha=1,
              grid_col='black'):
@@ -334,7 +373,7 @@ class Pitch:
             grid_col: Color to be passed to matplotlib
 
 
-        Returrns
+        Returns
         -----------
            fig,ax : figure and aixs objects (so that other data can be plotted onto the pitch)
 
@@ -454,14 +493,8 @@ class Match:
                  hertz=25, colors=('red', 'blue')):
         self.__player_ids = [p.id for p in home_tracking] + [p.id for p in away_tracking]
         self.__home_tracking = {p.id: p for p in home_tracking}
-        # Correct speed at the end/start of an half
-        # for player in self.__home_tracking.values():
-        #     print(type(player))
-        #     player.correct_speed(halves, hertz)
         self.__pitch = pitch
         self.__away_tracking = {p.id: p for p in away_tracking}
-        # for player in self.__away_tracking.values():
-        #     player.correct_speed(halves, hertz)
         self.__ball = ball
         self.__events = events
         self.__hertz = hertz
@@ -469,6 +502,16 @@ class Match:
         self.__away_name = away_name
         self.__pitch_dimension = pitch.dimension
         self.__team_names = (home_name, away_name)
+        self.__colors = {team:color for team, color in zip(self.__team_names, colors)}
+        # Correct speed at the end/start of an half
+        # for player in self.__home_tracking.values():
+        #     print(f"Correcting Velocity for Player {player.id}.")
+        #     player.correct_speed(halves, hertz)
+        # for player in self.away_tracking.values():
+        #     print(f"Correcting Velocity for Player {player.id}.")
+        #     player.correct_speed(halves, hertz)
+        # print(f"Correcting Velocity for Ball.")
+        # ball.correct_speed(halves, hertz)
         self.get_GKs()
 
     @property
@@ -510,6 +553,26 @@ class Match:
     @property
     def teams(self):
         return (self.__team_names)
+
+    @property
+    def team_colors(self):
+        return(self.__colors)
+
+    @team_colors.setter
+    def team_colors(self, colors):
+        '''
+        Change the colors of the team
+        :param colors: an iterable of length 2 containing the colors. Also a dictionary The colors must be specified in
+            a way that matplotlib understads.
+        '''
+        if not isinstance(colors, dict):
+            self.__colors = {team: color for team, color in zip(self.__team_names, colors)}
+        else:
+            ks = set(k for k in colors.keys())
+            if ks == set(team for team in self.__team_names):
+                self.__colors = colors
+            else:
+                raise KeyError("The key of the dictionary match the teams' name of the match object.")
 
     @teams.setter
     def teams(self, team_names):
@@ -576,9 +639,8 @@ class Match:
         self.__attack_dir = attack_sides
 
 
-    def plot_frame(self, frame, figax=None, team_colors=('r', 'b'), include_player_velocities=False,
-                   PlayerMarkerSize=10,
-                   PlayerAlpha=0.7, annotate=False):
+    def plot_frame(self, frame, figax=None, include_player_velocities=False, PlayerMarkerSize=10, PlayerAlpha=0.7,
+                   annotate=False):
         """ plot_frame( hometeam, awayteam )
 
         Plots a frame of Metrica tracking data (player positions and the ball) on a football pitch. All distances should be
@@ -594,7 +656,7 @@ class Match:
                          (blue away team)
             field_dimen: tuple containing the length and width of the pitch in meters. Default is (106,68)
             include_player_velocities: Boolean variable that determines whether player velocities are also plotted
-                                       (as quivers). Default is False
+                                       (26500 quivers). Default is False
             PlayerMarkerSize: size of the individual player marlers. Default is 10
             PlayerAlpha: alpha (transparency) of player markers. Defaault is 0.7
             annotate: Boolean variable that determines with player jersey numbers are added to the plot (default is False)
@@ -610,15 +672,16 @@ class Match:
             fig, ax = figax  # unpack tuple
         # plot home & away teams in order
         relevant_players = {}
-        for team_name, team, color in zip(self.__team_names, [self.__home_tracking, self.__away_tracking], team_colors):
+        for team_name, team in zip(self.__team_names, [self.__home_tracking, self.__away_tracking]):
             print(f"TEAM: {team_name}")
+            color = self.__colors[team_name]
             _ = [p for p in team.values() if isinstance(p.positions.loc[frame], Point)]
             relevant_players[team_name] = _
             # X and Y position for the home/away team
             Xs = [p.positions.loc[frame].x for p in _]
             Ys = [p.positions.loc[frame].y for p in _]
             # plot player positions
-            ax.plot(Xs, Ys, color + 'o', markersize=PlayerMarkerSize, alpha=PlayerAlpha)
+            ax.plot(Xs, Ys, color=color, marker='o', markersize=PlayerMarkerSize, alpha=PlayerAlpha, linestyle="")
             if include_player_velocities:
                 vx = [p.velocity.loc[frame, 'x'] for p in
                       relevant_players[team_name]]  # X component of the speed vector
@@ -633,9 +696,8 @@ class Match:
                             color=color)
         # plot ball
         if isinstance(self.__ball.positions.loc[frame], Point):
-            ax.plot(self.__ball.positions.loc[frame].x, self.__ball.positions.loc[frame].y, 'ko', markersize=6,
-                    alpha=1.0,
-                    linewidth=0, color='white')
+            ax.plot(self.__ball.positions.loc[frame].x, self.__ball.positions.loc[frame].y, markersize=6, marker='o',
+                    alpha=1.0, linewidth=0, color='white', linestyle="")
         return fig, ax
 
     def save_match_clip(self, sequence, fpath, fname='clip_test', figax=None,
@@ -657,7 +719,7 @@ class Match:
             PlayerMarkerSize: size of the individual player marlers. Default is 10
             PlayerAlpha: alpha (transparency) of player markers. Defaault is 0.7
 
-        Returrns
+        Returns
         -----------
            fig,ax : figure and aixs objects (so that other data can be plotted onto the pitch)
 
@@ -683,15 +745,16 @@ class Match:
             for frame in sequence:
                 figobjs = []  # this is used to collect up all the axis objects so that they can be deleted after each iteration
                 relevant_players = {}
-                for team_name, team, color in \
-                        zip(self.__team_names, [self.__home_tracking, self.__away_tracking], team_colors):
+                for team_name, team in zip(self.__team_names, [self.__home_tracking, self.__away_tracking]):
+                    color = self.__colors[team_name]
                     # Get players on the pitch
                     _ = [p for p in team.values() if isinstance(p.positions.loc[frame], Point)]
                     relevant_players[team_name] = _
                     Xs = [p.positions.loc[frame].x for p in _]
                     Ys = [p.positions.loc[frame].y for p in _]
                     # Plot players position
-                    objs, = ax.plot(Xs, Ys, color + 'o', markersize=PlayerMarkerSize, alpha=PlayerAlpha)
+                    objs, = ax.plot(Xs, Ys, color=color, marker='o', markersize=PlayerMarkerSize, alpha=PlayerAlpha,
+                                    linestyle="")
                     figobjs.append(objs)
                     if include_player_velocities:
                         vx = [p.velocity.loc[frame, 'x'] for p in
@@ -705,8 +768,8 @@ class Match:
                         figobjs.append(objs)
                 # plot ball
                 if isinstance(self.__ball.positions.loc[frame], Point):
-                    objs, = ax.plot(self.__ball.positions.loc[frame].x, self.__ball.positions.loc[frame].y, 'ko',
-                                    markersize=6, alpha=1.0, linewidth=0, color='white')
+                    objs, = ax.plot(self.__ball.positions.loc[frame].x, self.__ball.positions.loc[frame].y, marker='o',
+                                    markersize=6, alpha=1.0, linewidth=0, color='white', linestyle="")
                     # objs, = ax.plot(team['ball_x'], team['ball_y'], 'ko', MarkerSize=6, alpha=1.0, LineWidth=0)
                     figobjs.append(objs)
                 # include match time at the top
@@ -723,8 +786,8 @@ class Match:
         plt.clf()
         plt.close(fig)
 
-    def plot_events(self, event_ids, figax=None, indicators=['Marker', 'Arrow'], color='r',
-                    marker_style='o', alpha=0.5, annotate=False):
+    def plot_events(self, event_ids, figax=None, indicators=['Marker', 'Arrow'], marker_style='o', alpha=0.5,
+                    annotate=False):
         """ plot_events( events )
 
         Plots Metrica event positions on a football pitch. event data can be a single or several rows of a data frame.
@@ -738,13 +801,12 @@ class Match:
             field_dimen: tuple containing the length and width of the pitch in meters. Default is (106,68)
             indicators: List containing choices on how to plot the event. 'Marker' places a marker at the 'Start X/Y'
                         location of the event; 'Arrow' draws an arrow from the start to end locations. Can choose one or both.
-            color: color of indicator. Default is 'r' (red)
             marker_style: Marker type used to indicate the event position. Default is 'o' (filled ircle).
             alpha: alpha of event marker. Default is 0.5
             annotate: Boolean determining whether text annotation from event data 'Type' and 'From' fields is shown on plot.
                       Default is False.
 
-        Returrns
+        Returns
         -----------
              fig,ax : figure and aixs objects (so that other data can be plotted onto the pitch)
 
@@ -756,17 +818,19 @@ class Match:
             fig, ax = figax
         events = self.__events.loc[event_ids, :]
         for i, row in events.iterrows():
-            if 'Marker' in indicators:
-                # ax.plot(row['Start X'], row['Start Y'], color+marker_style, alpha=alpha )
-                ax.plot(row['Start'].x, row['Start'].y, color + marker_style, alpha=alpha)
-            if 'Arrow' in indicators:
-                ax.annotate("", xy=row['End'].xy, xytext=row['Start'].xy,
-                            alpha=alpha,
-                            arrowprops=dict(alpha=alpha, width=0.5, headlength=4.0, headwidth=4.0, color=color),
-                            annotation_clip=False)
-            if annotate:
-                text_string = row['Type'] + ': ' + row['From']
-                ax.text(row['Start'].x, row['Start'].y, text_string, fontsize=10, color=color)
+            color = self.__colors[row['Team'].casefold()]
+            if not pd.isna(row['Start']):
+                if 'Marker' in indicators:
+                    ax.plot(row['Start'].x, row['Start'].y, color=color, marker=marker_style, alpha=alpha)
+                if 'Arrow' in indicators:
+                    if not pd.isna(row['End']):
+                        ax.annotate("", xy=row['End'].xy, xytext=row['Start'].xy,
+                                    alpha=alpha,
+                                    arrowprops=dict(alpha=alpha, width=0.5, headlength=4.0, headwidth=4.0, color=color),
+                                    annotation_clip=False)
+                if annotate:
+                    text_string = row['Type'] + ': ' + row['From']
+                    ax.text(row['Start'].x, row['Start'].y, text_string, fontsize=10, color=color)
         return fig, ax
 
     def plot_pitchcontrol_for_event(self, event_id, PPCF, alpha=0.7,
@@ -805,8 +869,7 @@ class Match:
         self.plot_frame(pass_frame, figax=(fig, ax), PlayerAlpha=alpha,
                         include_player_velocities=include_player_velocities, annotate=annotate)
         self.plot_events(self.__events.loc[event_id:event_id], figax=(fig, ax), indicators=['Marker', 'Arrow'],
-                         annotate=False,
-                         color='k', alpha=1)
+                         annotate=False, alpha=1)
 
         # plot pitch control surface
         if pass_team == 'Home':

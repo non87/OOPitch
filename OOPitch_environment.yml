@@ -1,0 +1,11 @@
+name: football_analytics
+channels:
+  - defaults
+dependencies:
+  - pandas
+  - scipy
+  - shapely
+  - matplotlib
+  - geopandas
+  - descartes
+  - jupyter
