@@ -4,7 +4,7 @@ from pendulum import from_format
 import xml.etree.ElementTree as ET
 
 '''
-This file contains variables useful to parse Opta f24 data
+This file contains variables and functions useful to parse Opta f24 data
 
 Without a clear guide about the collection of Opta data, I identified 3 main sources of potential error and noise
 in the conversion from f24 to SPADL.
@@ -495,5 +495,3 @@ def read_f24(f24_file):
     f24 = f24.find("Game")
     spadl = f24_2_SPDAL(f24)
     return(spadl)
-
-# read_f24("odense_own_goal.xml")
