@@ -260,6 +260,48 @@ def parse_keeper(event, event_type = None, qual_leaf = None, quals = None):
     # Return all new info
     return spadl_event, x_end, y_end, outcome, body_part, special
 
+min_dribble_length: float = 3.0
+max_dribble_length: float = 60.0
+max_dribble_duration: float = (10.0)*opta_hertz
+
+# From socceractions package
+# Adaptation of Code by Pieter Robberechts
+def _add_dribbles(spadl):
+    next_actions = spadl.shift(-1)
+
+    same_team = spadl.team == next_actions.team
+    # not_clearance = actions.type_id != actiontypes.index("clearance")
+
+    dx = spadl.x_end - next_actions.x_start
+    dy = spadl.y_end - next_actions.y_start
+    far_enough = dx ** 2 + dy ** 2 >= min_dribble_length ** 2
+    not_too_far = dx ** 2 + dy ** 2 <= max_dribble_length ** 2
+
+    dt = next_actions.frame - spadl.frame
+    same_phase = dt < max_dribble_duration
+    same_period = spadl.period == next_actions.period
+
+    dribble_idx = same_team & far_enough & not_too_far & same_phase & same_period
+
+    dribbles = pd.DataFrame()
+    prev = spadl[dribble_idx]
+    nex = next_actions[dribble_idx]
+    dribbles['period'] = nex.period
+    dribbles['frame'] = (prev.frame + nex.frame) / 2
+    dribbles['team'] = nex.team
+    dribbles['player'] = nex.player
+    dribbles['x_start'] = prev.x_end
+    dribbles['y_start'] = prev.y_end
+    dribbles['x_end'] = nex.x_start
+    dribbles['y_end'] = nex.y_start
+    dribbles['body_part'] = 'feet'
+    dribbles['event'] = 'dribble'
+    dribbles['outcome'] = 'Success'
+
+    spadl = pd.concat([spadl, dribbles], ignore_index=True, sort=False)
+    spadl = spadl.sort_values(['frame']).reset_index(drop=True)
+    return spadl
+
 def f24_2_SPDAL(f24, timestamps = None):
     '''
     This function translates the f24 xml to a pandas dataframe in the SPADL+ format. The logic of the translation is
@@ -417,6 +459,9 @@ def f24_2_SPDAL(f24, timestamps = None):
     1. aligning the kickoff frame (read from meta) with the kickoff timestamp (read from f24)
     2. calculate the difference in millisecond between successive events and the kickoff event
     3. round the difference to the closest frame
+    However it turns out we can think of this problem as having different estimators (one per start/end of a period)
+    Taking the mean of such estimator provably diminishes the variances around the true value under mild assumption
+    (basically, the error distribution has 0 skewness)
     '''
     print("Calculating Frames")
     assert len(period_boundaries) in [4,8]
@@ -436,7 +481,8 @@ def f24_2_SPDAL(f24, timestamps = None):
             interval_lenght_in_frame = np.int_(np.round((period_boundaries[i] - period_boundaries[i-1])*opta_hertz))
             period = (i / 2) + 1
             spadl.loc[spadl['period']== period, 'frame'] = spadl.loc[spadl['period']== period, 'frame'] - interval_lenght_in_frame
-
+    # Add dribbling
+    spadl = _add_dribbles(spadl)
     return(spadl)
 
 def read_f24(f24_file):
