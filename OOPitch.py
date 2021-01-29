@@ -621,7 +621,7 @@ class Match:
         GKs = {team:np.nan for team in self.__team_names}
         # koff_frame = self.__events.iloc[0,
         #                            'frame Frame']
-        koff_frame = self.__events.iloc[0].frame
+        koff_frame = self.__events.iloc[0].name
         # We infer attack direction based on the kickoff positions
         for team_name, team in zip(self.__team_names, [self.__home_tracking, self.__away_tracking]):
             _ = [p for p in team.values() if isinstance(p.positions.loc[koff_frame], Point)]
@@ -795,7 +795,7 @@ class Match:
 
         Parameters
         -----------
-            events: index (or indices) for the event in the event dataframe of the match object
+            event_ids: index (or indices) for the event in the event dataframe of the match object
             fig,ax: Can be used to pass in the (fig,ax) objects of a previously generated pitch. Set to (fig,ax) to use an
                     existing figure, or None (the default) to generate a new pitch plot,
             field_dimen: tuple containing the length and width of the pitch in meters. Default is (106,68)
@@ -829,7 +829,7 @@ class Match:
                                     arrowprops=dict(alpha=alpha, width=0.5, headlength=4.0, headwidth=4.0, color=color),
                                     annotation_clip=False)
                 if annotate:
-                    text_string = row['Type'] + ': ' + row['From']
+                    text_string = row['event'] + ': ' + row['From']
                     ax.text(row['Start'].x, row['Start'].y, text_string, fontsize=10, color=color)
         return fig, ax
 

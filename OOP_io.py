@@ -201,7 +201,7 @@ def read_metrica(home_path, away_path, events_path, home_name='home', away_name=
 
 
 
-def read_chyron_zip(zip_file_path):
+def open_chyron_zip(zip_file_path):
     zp = zipfile.ZipFile(zip_file_path)
     f24 = [x for x in zp.filelist if 'f24' in x.filename][0]
     f7  = [x for x in zp.filelist if 'f7' in x.filename][0]
@@ -260,11 +260,13 @@ def parse_f7_opta(f7, anonymized = False):
                 teams_dt[i]['anon_id'] = 'home'
                 teams_dt[i]['venue'] = 'home'
                 teams_dt[i]['id'] = team.attrib['TeamRef']
+                teams_dt[i]['name'] = 'home'
             else:
                 base_str = 'away'
                 teams_dt[i]['anon_id'] = 'away'
                 teams_dt[i]['venue'] = 'away'
                 teams_dt[i]['id'] = team.attrib['TeamRef']
+                teams_dt[i]['name'] = 'away'
         for p in team.findall('PlayerLineUp/MatchPlayer'):
             j += 1
             if anonymized:
@@ -340,11 +342,12 @@ def parse_f24_opta(f24, pitch_dim=(106, 68), teams=None, periods=None, players=N
     spadl[['x_end', 'y_end']] = pd.concat(ends)
     return(spadl)
 
-def parse_tracab(trac_dt, teams, players_id, spadl=None, anonymized=False):
+def parse_tracab(trac_dt, periods, teams, players_id, spadl=None, anonymized=False):
     '''
     Parse the .dat tracab file in a more convenient pandas dataframe.
 
     :param trac_dt: The trac_dt file path
+    :param periods: A periods dictionary from parse_meta_chyron
     :param teams: A dictionary containing team data. Result of parse_f7()
     :param players_id: A dictionary containing player data. Result of parse_f7()
     :param spadl: A spadl event dataframe as obtained from a parse_f24(). Optional
@@ -371,7 +374,7 @@ def parse_tracab(trac_dt, teams, players_id, spadl=None, anonymized=False):
             return (p_ids[p_data['team_id']][p_data['jersey_no']]['anon_id'])
 
     print("Parsing tracking data")
-    trac_dt = pd.read_csv( trac_dt, sep=':', header=0, names=['frame', 'player_dt', 'ball_dt', 'drop'])
+    trac_dt = pd.read_csv(trac_dt, sep=':', header=0, names=['frame', 'player_dt', 'ball_dt', 'drop'])
     trac_dt = trac_dt.drop(columns=['drop'])
     # We use string methods below
     trac_dt = trac_dt.astype({'frame': 'int64', 'player_dt': 'string', 'ball_dt': 'string'})
@@ -386,7 +389,7 @@ def parse_tracab(trac_dt, teams, players_id, spadl=None, anonymized=False):
         else:
             start = period['start']
             end = period['end']
-        period_sel[(trac_dt['frame'] >= start) & (trac_dt['frame']<= end)] = True
+        period_sel[(trac_dt['frame'] >= start) & (trac_dt['frame'] <= end)] = True
     trac_dt = trac_dt.loc[period_sel]
     # This creates a column for each humans on the pitch
     player_dt = trac_dt['player_dt'].str.split(";", expand=True)
@@ -447,60 +450,129 @@ def parse_tracab(trac_dt, teams, players_id, spadl=None, anonymized=False):
         ball['owning_team'] = ball['owning_team'].cat.rename_categories({'A': id_away, 'H': id_home})
     return(player_dt, ball)
 
+def read_chyronego(zip_file_path=None, f24_path=None, f7_path=None, tracking_path=None, meta_path=None,
+                   anonymized=False, n_grid_cells_x=50):
+    '''
+    Read the event and tracking files related to a match from the Chyronego portal and return a match object.
+    The files can be contained in one zipped folder -- as downloaded from the Chyronego web-portal -- or being stored
+    separately. In the latter case, the function needs a path for each of the f24, f7, meta and tracking file.
 
-anonymized = False
+    :param zip_file_path: The folder where the match data (f24, f7, meta and tracking) is stored
+    :param f24_path, f7_path, tracking_path, meta_path: path to the different files containing the match data.
+       Ignored if zip_file_path is specified
+    :param anonymized: Should the match file contain anonymized data?
+    :param n_grid_cells_x: Number of cells dividing the pitch object.
+    :return: A match object containing the data for the match
+    '''
+    # For zipped folders from the chyronego portal
+    if zip_file_path is not None:
+        f7, f24, meta, trac_dt = open_chyron_zip(zip_file_path)
+        trac_dt = StringIO(trac_dt.decode())
+    # In case files are stored separately
+    elif (f24_path is not None) and (f7_path is not None) and (tracking_path is not None) and (meta_path is not None):
+        with open(f24_path, 'r') as fl:
+            f24 = fl.read()
+        with open(f7_path, 'r') as fl:
+            f7 = fl.read()
+        with open(meta_path, 'r') as fl:
+            meta = fl.read()
+        trac_dt = tracking_path
+    else:
+        raise ValueError("If zip_file_path is not given, all of f24_path, f7_path and tracking_path must be passed")
+
+    periods, pitch_dim, hertz = parse_meta_chyron(meta)
+    teams, players = parse_f7_opta(f7, anonymized=anonymized)
+    home_team = 0 if teams[0]['venue'] == 'home' else 1
+    away_team = int(np.abs(home_team - 1))
+    spadl = parse_f24_opta(f24, teams=teams, pitch_dim=pitch_dim, periods=periods)
+    players_dt, ball_dt = parse_tracab(trac_dt, periods, teams, players, anonymized=anonymized, spadl=spadl)
+    # Create Points instead from x, y columns coordinate.
+    id_k = 'id' if not anonymized else 'anon_id'
+    ids_by_teams = [[],[]]
+    for t in [away_team, home_team]: ids_by_teams[t] =[p[id_k] for p in players[t].values()]
+    players_object = [[], []]
+    re_frame = pd.Series(np.arange(1, ball_dt.shape[0] + 1))
+    re_frame.index = ball_dt['frame']
+    # Get the first frame of each halves (a part the first)
+    halves = np.where(ball_dt['frame'].diff(1) > 1)[0] + 1
+    halves = halves.tolist()
+    for p_id, p in players_dt.items():
+        print(f"Creating Point objects for {p_id}")
+        team = home_team if p_id in ids_by_teams[home_team] else away_team
+        jersey = p['jersey_no'].unique()[0]
+        # Change Frames
+        p = p.set_index('frame')
+        p['frame'] = re_frame
+        p = p.set_index('frame')
+        # Change attacking direction in 2nd halves in extra times.
+        # TODO check rules for overtime
+        for i, half in enumerate(halves):
+            if i % 2 == 0:
+                if i < len(halves)-1:
+                    next_half = halves[i+1]-1
+                else:
+                    next_half = np.inf
+                p.loc[half:next_half, 'x'] = - p.loc[half:next_half, 'x']
+                p.loc[half:next_half, 'y'] = - p.loc[half:next_half, 'y']
+        positions = p.apply(lambda x: create_Point(x['x'], x['y']), axis=1)
+        positions = positions.reindex(re_frame)
+        players_object[team].append(Player(player_id=p_id, team=teams[team]['name'], positions=positions,
+                                           number=players[team][jersey]['number'], hertz=hertz))
+
+    ball_dt = ball_dt.set_index(ball_dt['frame'])
+    ball_dt['frame'] = re_frame
+    ball_dt = ball_dt.set_index(ball_dt['frame'])
+    # Change attack side for the ball
+    for i, half in enumerate(halves):
+        if i % 2 == 0:
+            if i < len(halves) - 1:
+                next_half = halves[i + 1] - 1
+            else:
+                next_half = np.inf
+            ball_dt.loc[half:next_half, 'x'] = - ball_dt.loc[half:next_half, 'x']
+            ball_dt.loc[half:next_half, 'y'] = - ball_dt.loc[half:next_half, 'y']
+
+    ball_point = ball_dt.apply(lambda x: create_Point(x['x'], x['y']), axis=1)
+    ball = Ball(positions=ball_point, hertz=hertz)
+    # Check colors
+    if teams[home_team]['color'] is not None:
+        colors = (teams[home_team]['color'], teams[away_team]['color'])
+    else:
+        colors = ('red', 'blue')
+
+    spadl = spadl.set_index('frame')
+    spadl['frame'] = re_frame
+    spadl = spadl.set_index(np.arange(1, spadl.shape[0] + 1))
+    # Change attack side for the events
+    for i, half in enumerate(halves):
+        if i % 2 == 0:
+            if i < len(halves) - 1:
+                next_half = halves[i + 1] - 1
+            else:
+                next_half = np.inf
+            relevant = (spadl['frame']>=half) & (spadl['frame']<=next_half)
+            spadl.loc[relevant, 'x_start'] = - spadl.loc[relevant, 'x_start']
+            spadl.loc[relevant, 'y_start'] = - spadl.loc[relevant, 'y_start']
+            spadl.loc[relevant, 'x_end'] = - spadl.loc[relevant, 'x_end']
+            spadl.loc[relevant, 'y_end'] = - spadl.loc[relevant, 'y_end']
+    spadl['start'] = spadl.apply(lambda x: create_Point(x['x_start'], x['y_start']), axis=1)
+    spadl['end'] = spadl.apply(lambda x: create_Point(x['x_end'], x['y_end']), axis=1)
+    spadl = spadl.drop(columns=['x_start', 'y_start', 'x_end', 'y_end'])
+    # Re order
+    spadl = spadl[['frame', 'event', 'period', 'player', 'team', 'outcome', 'start', 'end', 'body_part', 'special']]
+    # Create the pitch
+    pitch = Pitch(pitch_dimen=pitch_dim, n_grid_cells_x=n_grid_cells_x)
+    match = Match(home_tracking=players_object[home_team], away_tracking=players_object[away_team], events=spadl, ball=ball,
+                  pitch=pitch, halves=halves, away_name=teams[away_team]['name'],
+                  home_name=teams[home_team]['name'], hertz=hertz, colors=colors)
+    return(match)
+
+anonymized = True
 os.chdir('/home/non1987/Documents/football_analysis')
 zip_file_path = 'aalborg_recent.zip'
 n_grid_cells_x=50
-f7, f24, meta, trac_dt = read_chyron_zip(zip_file_path)
-periods, pitch_dim, hertz = parse_meta_chyron(meta)
-teams, players = parse_f7_opta(f7, anonymized=False)
-spadl = parse_f24_opta(f24, teams=teams, pitch_dim=pitch_dim, periods=periods)
-players_dt, ball_dt = parse_tracab(StringIO(trac_dt.decode()), teams, players, anonymized=anonymized, spadl=spadl)
-# Create Points instead from x, y columns coordinate.
-home_team = 0 if teams[0]['venue'] == 'home' else 1
-away_team = int(np.abs(home_team-1))
-ids_by_teams = [[p['id'] for p in players[home_team].values()],[p['id'] for p in players[1].values()]]
-players_object = [[], []]
-re_frame = pd.Series( np.arange(1, ball_dt.shape[0]+1))
-re_frame.index = ball_dt['frame']
-# Get the first frame of each halves (a part the first)
-halves = np.where(ball_dt['frame'].diff(1)>1)[0] + 1
-halves = halves.tolist()
-for p_id, p in players_dt.items():
-    print(f"Creating Point objects for {p_id}")
-    team = 0 if p_id in ids_by_teams[0] else 1
-    jersey = p['jersey_no'].unique()[0]
-    p = p.set_index('frame')
-    p['frame'] = re_frame
-    p = p.set_index('frame')
-    pos = home_team if teams[team]['venue'] == 'home' else away_team
-    positions = p.apply(lambda x: create_Point(x['x'], x['y']), axis=1)
-    positions = positions.reindex(re_frame)
-    players_object[pos].append(Player(player_id=p_id, team=teams[team]['name'], positions=positions,
-                                 number=players[team][jersey]['number'], hertz=hertz))
+match = read_chyronego(zip_file_path, anonymized=True)
 
-ball_dt = ball_dt.set_index(ball_dt['frame'])
-ball_dt['frame'] = re_frame
-ball_dt = ball_dt.set_index(ball_dt['frame'])
-
-ball_point = ball_dt.apply(lambda x: create_Point(x['x'], x['y']), axis=1)
-ball = Ball(positions=ball_point, hertz=hertz)
-# Check colors
-if teams[home_team]['color'] != None:
-    colors = (teams[home_team]['color'], teams[away_team]['color'])
-
-spadl = spadl.set_index('frame')
-spadl['frame'] = re_frame
-spadl = spadl.set_index(np.arange(1,spadl.shape[0]+1))
-
-
-# Create the pitch
-pitch = Pitch(pitch_dimen=pitch_dim, n_grid_cells_x=n_grid_cells_x)
-match = Match(home_tracking=players_object[0], away_tracking=players_object[1], events=spadl, ball=ball, pitch=pitch, halves=halves, away_name=teams[away_team]['name'],
-      home_name=teams[home_team]['name'], hertz=hertz, colors=colors)
-
-goal_frames = match.events.loc[(match.events['event']=='shot') & (match.events['outcome']=='Success'), 'frame']
-goal_frames.iloc[0]
+goal_frames = match.events.loc[(match.events['event'] == 'shot') & (match.events['outcome'] == 'Success'), 'frame']
 frames_in_the_clip = range(goal_frames.iloc[0]-250, goal_frames.iloc[0]+50)
 match.save_match_clip(sequence=frames_in_the_clip, fpath='.', fname='goal_aarhus')

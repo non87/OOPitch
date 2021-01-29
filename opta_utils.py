@@ -526,3 +526,16 @@ def read_f24(f24_file):
     f24 = f24.find("Game")
     spadl = f24_2_SPDAL(f24)
     return(spadl)
+
+
+'''
+def hilo(a, b, c):
+    if c < b: b, c = c, b
+    if b < a: a, b = b, a
+    if c < b: b, c = c, b
+    return a + c
+
+def complement(r, g, b):
+    k = hilo(r, g, b)
+    return tuple(k - u for u in (r, g, b))
+'''
