@@ -266,7 +266,7 @@ max_dribble_duration: float = (10.0)*opta_hertz
 
 # From socceractions package
 # Adaptation of Code by Pieter Robberechts
-def _add_dribbles(spadl):
+def add_dribbles(spadl):
     next_actions = spadl.shift(-1)
 
     same_team = spadl.team == next_actions.team
@@ -302,18 +302,25 @@ def _add_dribbles(spadl):
     spadl = spadl.sort_values(['frame']).reset_index(drop=True)
     return spadl
 
-def f24_2_SPDAL(f24, timestamps = None):
+def f24_2_SPDAL(f24, periods=None, hertz=None, aligning_strategy='period_specific'):
     '''
     This function translates the f24 xml to a pandas dataframe in the SPADL+ format. The logic of the translation is
     documented into a separate document. I added few categories to SPADL, that justifies the "+".
 
     :param f24: An xml.etree.ElementTree object, containing an Opta f24 file
+    :param periods: a dictionary containing the beginning and end frome for each period, from the meta.xml file
+    :param aligning_strategy: Given a periods dictionary, how to align the timestamp in the f24 to the fram in the tracking.
+        Possible values: 'period_specific' (align the start of each period), 'mean' (take the mean of the possible alignments)
+        Default: 'period_specific' should minimize discrepancies at the beginning of the halves, but get worst as the half
+        progresses
     :return: A pandas.DataFrame containing the SPADL event for the match
     '''
 
     # Save the time periods start and end
     period_boundaries = []
     previous_event = None
+    if hertz is None:
+        hertz=opta_hertz
     # it is necessary to keep track of end/ start period events because they are actually repeated in the f24!
     previous_event_end = False
     previous_event_start = False
@@ -454,35 +461,59 @@ def f24_2_SPDAL(f24, timestamps = None):
 
     '''
     We need to align the frame in the tracking data with the timestamp in the f24 data
-    this is not trivial because the timestamp is actually more precise than then frame (at hertz=25)
-    we proceed by 
-    1. aligning the kickoff frame (read from meta) with the kickoff timestamp (read from f24)
+    this is not trivial because the timestamp is actually more precise than then frame (at hertz=25) and there are 
+    discrepancies between the tracab and the f24 data. If we do not have tacking, we proceed by 
+    1. Stating that the kick-off is the first frame
     2. calculate the difference in millisecond between successive events and the kickoff event
     3. round the difference to the closest frame
-    However it turns out we can think of this problem as having different estimators (one per start/end of a period)
+    If we have tracking data and a meta file,  it turns out we can think of this problem as having different estimators (one per start/end of a period)
     Taking the mean of such estimator provably diminishes the variances around the true value under mild assumption
-    (basically, the error distribution has 0 skewness)
+    (basically, the error distribution has 0 skewness).
+    However, this can results in events that are on average best aligned, but singularly off by a second (25 frames)
+    The default strategy we use is to align the first frame of each halves.
     '''
     print("Calculating Frames")
     assert len(period_boundaries) in [4,8]
-    # Convert timestamps to frame
-    start_time_frame = period_boundaries[0]
-    # TODO mean of multiple estimators
-    if timestamps is not None:
-        timestamps = spadl['frame'] - start_time_frame
-        frames = np.int_(np.round(timestamps * opta_hertz)) + 1
+    if periods is not None:
+        if aligning_strategy == 'mean':
+            estimates = []
+            for i,period in periods.items():
+                i = int(i)
+                for k, fr in period.items():
+                    pos = ((i*2)-1) if k == 'end' else ((i*2)-2)
+                    timestamps = spadl['frame'] - period_boundaries[pos]
+                    estimates.append( (timestamps * hertz).round().astype(int) + fr )
+            # Take the mean
+            frames = pd.concat(estimates, axis=1).mean(axis=1).round().astype(int)
+        # Align first frame of every half
+        if aligning_strategy == 'period_specific':
+            frames = []
+            for i,period in periods.items():
+                fr = period['start']
+                i = int(i)
+                pos = ((i * 2) - 2)
+                timestamps = (spadl.loc[spadl['period'] == i, "frame"] - period_boundaries[pos])
+                frames.append((timestamps * hertz).round().astype(int) + fr)
+            frames = pd.concat(frames)
+        else:
+            raise ValueError("`mean` and `period_specific` are the only aligning strategies implemented. ")
+        spadl['frame'] = frames
     else:
+        # Convert timestamps to frame
+        start_time_frame = period_boundaries[0]
         timestamps = spadl['frame'] - start_time_frame
-        frames = np.int_(np.round(timestamps * opta_hertz)) + 1
-    spadl['frame'] = frames
-    # We need to subtract the interval length from second period (and further) frames
-    for i, boundary in enumerate(period_boundaries):
-        if (i % 2 == 0) and (i > 0):
-            interval_lenght_in_frame = np.int_(np.round((period_boundaries[i] - period_boundaries[i-1])*opta_hertz))
-            period = (i / 2) + 1
-            spadl.loc[spadl['period']== period, 'frame'] = spadl.loc[spadl['period']== period, 'frame'] - interval_lenght_in_frame
+        frames = np.int_(np.round(timestamps * hertz)) + 1
+        spadl['frame'] = frames
+        # We need to subtract the interval length from second period (and further) frames
+        for i, boundary in enumerate(period_boundaries):
+            if (i % 2 == 0) and (i > 0):
+                interval_lenght_in_frame = np.int_(
+                    np.round((period_boundaries[i] - period_boundaries[i - 1]) * hertz))
+                period = (i / 2) + 1
+                spadl.loc[spadl['period'] == period, 'frame'] = spadl.loc[spadl[
+                                                                'period'] == period, 'frame'] - interval_lenght_in_frame
     # Add dribbling
-    spadl = _add_dribbles(spadl)
+    spadl = add_dribbles(spadl)
     return(spadl)
 
 def read_f24(f24_file):

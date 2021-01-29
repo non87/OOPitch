@@ -619,9 +619,9 @@ class Match:
         '''
         attack_sides = {team:0 for team in self.__team_names}
         GKs = {team:np.nan for team in self.__team_names}
-        koff_frame = self.__events.loc[(self.__events['Subtype'] == 'KICK OFF') & (self.__events['Period'] == 1),
-                                   'Start Frame']
-        koff_frame = koff_frame.iloc[0]
+        # koff_frame = self.__events.iloc[0,
+        #                            'frame Frame']
+        koff_frame = self.__events.iloc[0].frame
         # We infer attack direction based on the kickoff positions
         for team_name, team in zip(self.__team_names, [self.__home_tracking, self.__away_tracking]):
             _ = [p for p in team.values() if isinstance(p.positions.loc[koff_frame], Point)]
@@ -701,7 +701,7 @@ class Match:
         return fig, ax
 
     def save_match_clip(self, sequence, fpath, fname='clip_test', figax=None,
-                        team_colors=('r', 'b'), field_dimen=(106.0, 68.0), include_player_velocities=False,
+                        field_dimen=(106.0, 68.0), include_player_velocities=False,
                         PlayerMarkerSize=10, PlayerAlpha=0.7):
         """ save_match_clip( hometeam, awayteam, fpath )
 
