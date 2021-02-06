@@ -36,7 +36,7 @@ class Point(pt):
         '''
         if isinstance(other, Point):
             return Point([self.x + other.x, self.y + other.y])
-        if np.isnan(other) or other is None:
+        elif other is None or np.isnan(other).sum():
             return np.nan
         else:
             # The strategy is to delegate all other type control to numpy.
@@ -48,7 +48,10 @@ class Point(pt):
         :param other: Point or array
         :return: Depends on other. If other is a Point, returns a Point. If other is anything else, returns a np.array
         '''
-        if isinstance(other, Point):
+        # You can do this with pd.isna(), but I don't want to introduce pd for this
+        if other is None or np.isnan(other).sum():
+            return np.nan
+        elif isinstance(other, Point):
             return Point([self.x - other.x, self.y - other.y])
         else:
             return self.xy - other

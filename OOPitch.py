@@ -7,14 +7,17 @@ to account for the necessities of football analytics.
 
 import numpy as np
 from scipy.signal import savgol_filter
-from shapely.geometry import Polygon, LineString
+from shapely.geometry import Polygon, LineString, MultiPoint, MultiPolygon
+import shapely.wkt as wkt
 from shapely_football import Point, SubPitch
 # We use geopandas most as a plotter. This will go away in more mature versions
 import geopandas as gpd
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
-import copy
+from scipy.stats import norm
+import pickle as pkl
+from copy import copy
 
 meters_per_yard = 0.9144  # unit conversion from yards to meters
 
@@ -40,6 +43,32 @@ class ObejctOnPitch:
             self.__filter_par = None
         self.__total_distance = np.nan
 
+    # Define state methods for pickling
+    def __getstate__(self):
+        state = copy(self.__dict__)
+        # Pickling geo-series is impossible. we get around it by saving the geo-series in a wkt format
+        if self.__positions is not None:
+            # Fill nas, otherwise we trigger an error when creating pos
+            pos = self.__positions.copy().fillna(value=Point([-999, -999]))
+            # Save positions as wkt
+            pos = MultiPoint(pos.geometry.to_list())
+            # We save frames for reference
+            state['_ObejctOnPitch__frames'] = self.__positions.index.values
+            state['_ObejctOnPitch__positions'] = pos.wkt
+        else:
+            state['_ObejctOnPitch__frames'] = None
+        return state
+
+    def __setstate__(self, state):
+        # Load positions from wkt if necessary
+        if state['_ObejctOnPitch__positions'] is not None:
+            pos = wkt.loads(state['_ObejctOnPitch__positions'])
+            pos = gpd.GeoSeries([Point(p) for p in pos.geoms])
+            pos.loc[pos == Point([-999, -999])] = None
+            pos.index = state['_ObejctOnPitch__frames']
+            state['_ObejctOnPitch__positions'] = pos
+        del state['_ObejctOnPitch__frames']
+        self.__dict__.update(state)
 
     def calculate_velocities(self, hertz, smoothing=True, filter_='Savitzky-Golay', window_length=7,
                              max_speed=12, **kwargs):
@@ -57,10 +86,10 @@ class ObejctOnPitch:
             return None
         self.__velocity_par = {'filter': None, 'hertz': hertz, 'max_speed': max_speed}
         # Velocity is a Dataframe containing the x,y components as two columns
-        velocity_x = (self.__positions.x.iloc[1:].to_numpy() - self.__positions.x.iloc[:-1]) * hertz
+        velocity_x = (self.__positions.x - self.__positions.shift(-1).x) * hertz
         # Last point has no velocity
-        velocity_x.loc[self.__positions.index[-1]] = np.nan
-        velocity_y = (self.__positions.y.iloc[1:].to_numpy() - self.__positions.y.iloc[:-1]) * hertz
+        # velocity_x.loc[self.__positions.index[-1]] = np.nan
+        velocity_y = (self.__positions.y - self.__positions.shift(-1).y) * hertz
         # Last point has no velocity
         velocity_y.loc[self.__positions.index[-1]] = np.nan
         velocity = pd.DataFrame(np.array([velocity_x, velocity_y], dtype=np.float32).T)
@@ -158,7 +187,7 @@ class ObejctOnPitch:
     @positions.setter
     def positions(self, positions):
         self.create_positions(positions)
-        kwargs = copy.copy(self.__filter_par)
+        kwargs = copy(self.__filter_par)
         try:
             window = kwargs['window_length']
             del kwargs['window_length']
@@ -206,7 +235,6 @@ class ObejctOnPitch:
                           fontsize=10, color=color)
         ax = self.__positions.loc[frames].plot(ax=ax, color=color, markersize=player_marker_size, alpha=player_alpha)
         return ax
-
 
 class Player(ObejctOnPitch):
     '''
@@ -258,17 +286,30 @@ class Player(ObejctOnPitch):
         else:
             raise TypeError("The value of Player.GK is either True or False.")
 
-
 class Ball(ObejctOnPitch):
     '''
     Define the ball and its property
     '''
 
     def __init__(self, positions=None, hertz=None, smoothing=True, filter_='Savitzky-Golay', window_length=7,
-                 max_speed=12, **kwargs):
+                 max_speed=12, in_play=None, **kwargs):
         super().__init__('ball', positions=positions, hertz=hertz, smoothing=smoothing,
                          filter_=filter_, window_length=window_length, max_speed=max_speed, **kwargs)
+        # DataFrame containing whether the ball is 'alive' or 'dead'
+        if in_play is not None:
+            assert self.positions is not None
+            assert in_play.shape[0] == super().positions.shape[0]
+            self.__in_play = in_play
 
+    @property
+    def in_play(self):
+        return self.__in_play
+
+    @in_play.setter
+    def in_play(self, in_play):
+        assert self.positions is not None
+        assert in_play.shape[0] == self.positions.shape[0]
+        self.__in_play = in_play
 
 class Pitch:
     '''
@@ -297,6 +338,42 @@ class Pitch:
             self.__n_grid_cells_y = None
             self.__subpitch = None
             self.__sub_centroids = None
+
+    # Define state methods for pickling
+    def __getstate__(self):
+        state = copy(self.__dict__)
+        state['_Pitch__polygon'] = state['_Pitch__polygon'].wkt
+        # Pickling geo-series is impossible. we get around it by saving the geo-series in a wkt format
+        if state['_Pitch__n_grid_cells_x'] is not None:
+            # Save subpitches as wkt
+            state['_Pitch__subpitch_inds'] = state['_Pitch__subpitch'].index.values
+            subp = MultiPolygon(state['_Pitch__subpitch'].geometry.to_list())
+            state['_Pitch__subpitch'] = subp.wkt
+            # Save centroids as wkt
+            state['_Pitch__sub_centroids_inds'] = state['_Pitch__sub_centroids'].index.values
+            cents = MultiPoint( state['_Pitch__sub_centroids'].geometry.to_list() )
+            state['_Pitch__sub_centroids'] = cents.wkt
+        else:
+            state['_Pitch__sub_centroids_inds'] = None
+            state['_Pitch__subpitch_inds'] = None
+        return state
+
+    def __setstate__(self, state):
+        state['_Pitch__polygon'] = wkt.loads(state['_Pitch__polygon'])
+        # Load sub-pitches and their centroids from wkt if necessary
+        if state['_Pitch__subpitch_inds'] is not None:
+            subp = wkt.loads(state['_Pitch__subpitch'])
+            subp = gpd.GeoSeries([SubPitch(p) for p in subp.geoms])
+            subp.index = state['_Pitch__subpitch_inds']
+            state['_Pitch__subpitch'] = subp
+            cents = wkt.loads(state['_Pitch__sub_centroids'])
+            cents = gpd.GeoSeries([Point(p) for p in cents.geoms])
+            cents.index = state['_Pitch__sub_centroids_inds']
+            state['_Pitch__sub_centroids'] = cents
+        del state['_Pitch__subpitch_inds']
+        del state['_Pitch__sub_centroids_inds']
+        self.__dict__.update(state)
+
 
     def create_subpitch(self, n_grid_cells_x):
         # break the pitch down into a grid
@@ -471,7 +548,6 @@ class Pitch:
             self.__subpitch.plot(ax=ax, facecolor="none", edgecolor=grid_col, alpha=grid_alpha)
         return fig, ax
 
-
 class Match:
     '''
     Contain all information about one match. It needs two iterables containing home and away Players, a Ball object, a
@@ -481,7 +557,8 @@ class Match:
     :param home_tracking:
     :param away_tracking:
     :param ball:
-    :param events:
+    :param events: A DataFrame of events data. Its first column should be a frame reference -- even if no tracking data
+       is passed
     :param pitch:
     :param halves:
     :param home_name:
@@ -490,7 +567,7 @@ class Match:
     '''
 
     def __init__(self, home_tracking, away_tracking, ball, events, pitch, halves, home_name='home', away_name='away',
-                 hertz=25, colors=('red', 'blue')):
+                 hertz=25, colors=('red', 'blue'), calculate_possession=False, possession_kwords={}):
         self.__player_ids = [p.id for p in home_tracking] + [p.id for p in away_tracking]
         self.__home_tracking = {p.id: p for p in home_tracking}
         self.__pitch = pitch
@@ -503,6 +580,13 @@ class Match:
         self.__pitch_dimension = pitch.dimension
         self.__team_names = (home_name, away_name)
         self.__colors = {team:color for team, color in zip(self.__team_names, colors)}
+        self.__possession_pars = possession_kwords
+        # First frame new half
+        self.__halves_frame = halves
+        if not calculate_possession:
+            self.__possession = None
+        else:
+            self.assign_possesion(**possession_kwords)
         # Correct speed at the end/start of an half
         # for player in self.__home_tracking.values():
         #     print(f"Correcting Velocity for Player {player.id}.")
@@ -512,7 +596,79 @@ class Match:
         #     player.correct_speed(halves, hertz)
         # print(f"Correcting Velocity for Ball.")
         # ball.correct_speed(halves, hertz)
+        # TODO This will only work if we have tracking data for the players
         self.get_GKs()
+
+    # Define state methods for pickling
+    def __getstate__(self):
+        state = copy(self.__dict__)
+        # We need to makes sure we can pickle the players, the ball, the pitch and the events
+        # Start with the ball
+        state['_Match__ball'] = (state['_Match__ball'].__class__, state['_Match__ball'].__getstate__())
+        # Continue with player
+        state['_Match__away_tracking'] = {p_id: (p_obj.__class__, p_obj.__getstate__())
+                                           for p_id, p_obj in state['_Match__away_tracking'].items()}
+        state['_Match__home_tracking'] = {p_id:  (p_obj.__class__, p_obj.__getstate__())
+                                           for p_id, p_obj in state['_Match__home_tracking'].items()}
+        # Then the pitch
+        state['_Match__pitch'] = (state['_Match__pitch'].__class__, state['_Match__pitch'].__getstate__())
+        # Finally, the events
+        # Check which columns are geometries
+        state['_Match__event_geometry'] = {}
+        events = self.__events.copy()
+        state['_Match__event_orders'] = events.columns.values.copy()
+        for col, dtype in zip(events.columns, events.dtypes):
+            # Save the geometry columns as wkt
+            if dtype == 'object' and isinstance(events.loc[~events[col].isna(), col].iloc[0], Point):
+                # Pandas have a strange behavior with fillna or simple assignment
+                g_col = events[col].apply(lambda x: Point([-999, -999]) if pd.isna(x) else x)
+                state['_Match__event_geometry'][col] = MultiPoint(g_col.to_list()).wkt
+                events = events.drop(columns=[col])
+        state['_Match__events'] = events
+        return state
+
+    def __setstate__(self, state):
+        # We need to rebuild the objects containing geometries
+        # Start with the ball
+        cls = state['_Match__ball'][0]
+        ball = cls.__new__(cls)
+        ball.__setstate__(state['_Match__ball'][1])
+        state['_Match__ball'] = ball
+        # Continue with players
+        away_tracking = {}
+        home_tracking = {}
+        for p_id, obj in state['_Match__away_tracking'].items():
+            cls = obj[0]
+            p = cls.__new__(cls)
+            p.__setstate__(obj[1])
+            away_tracking[p_id] = p
+        state['_Match__away_tracking'] = away_tracking
+        for p_id, obj in state['_Match__home_tracking'].items():
+            cls = obj[0]
+            p = cls.__new__(cls)
+            p.__setstate__(obj[1])
+            home_tracking[p_id] = p
+        state['_Match__home_tracking'] = home_tracking
+        # Then the pitch
+        cls = state['_Match__pitch'][0]
+        pitch = cls.__new__(cls)
+        pitch.__setstate__(state['_Match__pitch'][1])
+        state['_Match__pitch'] = pitch
+        # Now the events
+        for col, geoms in state['_Match__event_geometry'].items():
+            # Make a series
+            geoms = pd.Series([Point(p) for p in wkt.loads(geoms).geoms])
+            geoms.index = state['_Match__events'].index
+            # Get the Nans back
+            geoms[geoms == Point([-999., -999.])] = np.nan
+            state['_Match__events'][col] = geoms
+        state['_Match__events'] = state['_Match__events'][state['_Match__event_orders']]
+        del state['_Match__event_orders'], state['_Match__event_geometry']
+        self.__dict__.update(state)
+
+    def save(self, save_path):
+        with open(save_path, 'wb') as fl:
+            pkl.dump(self, fl)
 
     @property
     def pitch(self):
@@ -553,6 +709,10 @@ class Match:
     @property
     def teams(self):
         return (self.__team_names)
+
+    @property
+    def halves(self):
+        return (self.__halves_frame)
 
     @property
     def team_colors(self):
@@ -598,6 +758,30 @@ class Match:
         '''
         return(self.__attack_dir)
 
+    @property
+    def possession(self):
+        '''
+        Possession spells. Calculate them if not already calculated
+        '''
+        if self.__possession is None:
+            self.assign_possesion(**self.__possession_pars)
+        return self.__possession
+
+    @property
+    def possession_parameters(self):
+        '''
+        Parameters used in the calculation of possession
+        '''
+        return self.__possession_pars
+
+    @possession_parameters.setter
+    def possession_parameters(self, new_pars):
+        '''
+        Parameters used in the calculation of possession. May contain a partial change (no need to set all parameters
+        all the time)
+        '''
+        self.__possession_pars.update(new_pars)
+
     def __getitem__(self, item):
         '''
         Quick ways to get tracking data or events
@@ -619,8 +803,6 @@ class Match:
         '''
         attack_sides = {team:0 for team in self.__team_names}
         GKs = {team:np.nan for team in self.__team_names}
-        # koff_frame = self.__events.iloc[0,
-        #                            'frame Frame']
         koff_frame = self.__events.iloc[0].name
         # We infer attack direction based on the kickoff positions
         for team_name, team in zip(self.__team_names, [self.__home_tracking, self.__away_tracking]):
@@ -700,16 +882,16 @@ class Match:
                     alpha=1.0, linewidth=0, color='white', linestyle="")
         return fig, ax
 
-    def save_match_clip(self, sequence, fpath, fname='clip_test', figax=None,
+    def save_match_clip(self, sequence, path, figax=None,
                         field_dimen=(106.0, 68.0), include_player_velocities=False,
-                        PlayerMarkerSize=10, PlayerAlpha=0.7):
+                        PlayerMarkerSize=10, PlayerAlpha=0.7, annotate=False, frame_timing=False):
         """ save_match_clip( hometeam, awayteam, fpath )
 
         Generates a movie from Metrica tracking data, saving it in the 'fpath' directory with name 'fname'
 
         Parameters
         -----------
-            fpath: directory to save the movie
+            path: path to the output file
             fname: movie filename. Default is 'clip_test.mp4'
             fig,ax: Can be used to pass in the (fig,ax) objects of a previously generated pitch. Set to (fig,ax) to use an existing figure, or None (the default) to generate a new pitch plot,
             frames_per_second: frames per second to assume when generating the movie. Default is 25.
@@ -732,7 +914,8 @@ class Match:
         FFMpegWriter = animation.writers['ffmpeg']
         metadata = dict(title='Tracking Data', artist='Matplotlib', comment='Metrica tracking data clip')
         writer = FFMpegWriter(fps=self.__hertz, metadata=metadata)
-        fname = fpath + '/' + fname + '.mp4'  # path and filename
+        if path[-4:] != '.mp4': path += '.mp4'
+        # fname = fpath + '/' + fname + '.mp4'  # path and filename
         # create football pitch
         if figax is None:
             fig, ax = self.pitch.plot()
@@ -741,7 +924,7 @@ class Match:
         fig.set_tight_layout(True)
         # Generate movie
         print("Generating movie...", end='')
-        with writer.saving(fig, fname, 100):
+        with writer.saving(fig, path, 100):
             for frame in sequence:
                 figobjs = []  # this is used to collect up all the axis objects so that they can be deleted after each iteration
                 relevant_players = {}
@@ -766,16 +949,24 @@ class Match:
                                          scale_units='inches', scale=10., width=0.0015, headlength=5, headwidth=3,
                                          alpha=PlayerAlpha)
                         figobjs.append(objs)
+                    if annotate:
+                        for i, player in enumerate(relevant_players[team_name]):
+                            objs = ax.text(Xs[i] + 0.5, Ys[i] + 0.5, player.id, fontsize=10,  color=color)
+                            figobjs.append(objs)
+
                 # plot ball
                 if isinstance(self.__ball.positions.loc[frame], Point):
                     objs, = ax.plot(self.__ball.positions.loc[frame].x, self.__ball.positions.loc[frame].y, marker='o',
                                     markersize=6, alpha=1.0, linewidth=0, color='white', linestyle="")
                     # objs, = ax.plot(team['ball_x'], team['ball_y'], 'ko', MarkerSize=6, alpha=1.0, LineWidth=0)
                     figobjs.append(objs)
-                # include match time at the top
-                frame_minute = np.int(frame / (60 * 25))
-                frame_second = np.int( np.floor((frame / (60 * 25) - frame_minute) * 60.))
-                timestring = f"{frame_minute}:{frame_second}"
+                # include time reference at the top
+                if not frame_timing:
+                    frame_minute = np.int(frame / (60 * 25))
+                    frame_second = np.int( np.floor((frame / (60 * 25) - frame_minute) * 60.))
+                    timestring = f"{frame_minute}:{frame_second}"
+                else:
+                    timestring = f"{frame}"
                 objs = ax.text(-2.5, field_dimen[1] / 2. + 1., timestring, fontsize=14)
                 figobjs.append(objs)
                 writer.grab_frame()
@@ -884,3 +1075,196 @@ class Match:
         return fig, ax
 
 
+
+    def assign_possesion(self, sd=0.4, modify_event=True, min_speed_passage=0.12, max_recaliber=1.5,
+                         filter_spells=True, filter_tol=2):
+        '''
+        A simple function to find possession spells during the game based on the position of the ball and the players.
+        Substantially select the closest player to the ball as the one having possession, but also filters for dead balls and
+        passess. Uses a lot of information from the event data, substantially making the assumption that any possession spell
+        must leave a mark in the events. If modify_event is True, we use the possession data to input the frame of the
+        events in the event data -- this on average augments the quality of the f24 Opta data.
+        :param self:
+        :param sd:
+        :param modify_event:
+        :param min_speed_passage:
+        :param max_recaliber:
+        :param filter_spells:
+        :param filter_tol:
+        :return:
+        '''
+        [range(half - 5, half + 5) for half in self.__halves_frame]
+        voluntary_toss = ['pass', 'clearance', 'short free-kick', 'crossed free-kick', 'throw-in', 'other free-kick',
+                          'cross', 'shot', 'crossed corner', 'free-kick shot', 'keeper punch']
+        if filter_tol <1: filter_tol = 1
+
+        distances =  [[], []]
+        ids = [[], []]
+        events = self.__events
+        for p_id, p in self.__away_tracking.items():
+            distances[0].append(self.__ball.positions.subtract(p.positions.astype('object')))
+            ids[0].append(p_id)
+
+        # Useful for re-calibrating the events' frame
+        events['recalibrated'] = False
+        events['frame_safe'] = events['frame'].copy()
+
+        distances = [[], []]
+        ids = [[], []]
+
+        # Calculate the distance of every player from the ball at every frame. Takes time
+        for i, team in enumerate([self.__home_tracking, self.__away_tracking]):
+            print(f"Calculating possession for team {[self.__home_name, self.__away_name][i]}")
+            for p_id, p in team.items():
+                print(f"Calculating the possession for player {p_id}")
+                ids[i].append(p_id)
+                temp = pd.concat([p.positions, self.__ball.positions], axis=1)
+                temp.columns = ['player', 'ball']
+                temp = temp.loc[(~pd.isna(temp['player'])) & (~pd.isna(temp['ball']))]
+                distances[i].append(temp.apply(lambda x: x['ball'].distance(x['player']), axis=1))
+
+        ids_dic = {id_: i for ids_team in ids for i, id_ in enumerate( ids_team)}
+        min_team = [[], []]
+        min_dists = [[], []]
+        # Calculate who is the closest to the ball for each team and her distance from the ball
+        for team in [0, 1]:
+            # Create the team Df
+            distances[team] = pd.concat(distances[team], axis=1)
+            distances[team].columns = ids[team]
+            distances[team] = distances[team].fillna(np.inf)
+            # Get the minimum frame by frame
+            min_team[team] = distances[team].idxmin(axis=1)
+            # This is a way to build a fancy index
+            temp = np.vstack([min_team[team].index.values, min_team[team].apply(lambda x: ids_dic[x]).to_numpy()])
+            min_dists[team] = pd.Series(distances[team].to_numpy()[temp[0]-1, temp[1]])
+            min_dists[team].index = min_team[team].index
+
+        min_dists = pd.concat(min_dists, axis=1)
+        min_team = pd.concat(min_team, axis=1)
+        # heuristics to identify "noman's ball" and filter it out.
+        # We need to be careful because the ball tracking appears to be widely inaccurate
+        passes = ((min_dists.loc[:, 0] > sd * 5) & (min_dists.loc[:, 1] > sd * 5))
+        # Dead ball filter if available
+        try:
+            alive = (self.__ball.in_play == 'Alive')
+        except AttributeError:
+            alive = np.zeros((self.__ball.positions.shape[0],), dtype='bool')
+        # Heuristic to identify who has the ball and how sure we are
+        team_possession = min_dists[(~passes) & (alive)].idxmin(axis=1)
+        # Final results
+        possession = pd.DataFrame({"team":min_dists[0], "player":min_dists[0], "P":min_dists[0]})
+        possession.loc[(passes) | (~alive), 'team'] = np.nan
+        possession.loc[(~passes) & (alive), 'team'] = team_possession
+        possession_player = min_team[(~passes) & (alive)].to_numpy()[np.arange(team_possession.shape[0]), team_possession.to_numpy()]
+        possession_player = pd.Series(possession_player, index=min_team[(~passes) & (alive)].index)
+        possession.loc[(~passes) & (alive), 'player'] = possession_player
+        possession.loc[(passes) | (~alive), 'player'] = np.nan
+        # normal model
+        n0 = norm.pdf(min_dists.loc[:, 0], scale=sd)
+        n1 = norm.pdf(min_dists.loc[:, 1], scale=sd)
+        possession.loc[:, 'P'] = np.max([n0,n1],axis=0)/(n0 + n1)
+        # possession = possession.astype({'possession_team': 'category', 'possession_player': 'category'})
+        # passes_ind = min_dists.index[passes]
+        # posses_ind = min_dists.index[~passes]
+        possession['spell'] = (possession.player.fillna('---') != possession.player.fillna('---').shift(1)).astype('int').cumsum()
+        possession.loc[passes, 'spell'] = -99
+        # The types of events that indicate a players willingly getting rid of the ball
+        # Do not count -99
+        spells = np.sort(possession['spell'].unique())
+        spells = spells[spells != -99]
+        # Sometime we split possession spell because of tracking imprecision. This loop fills some gap
+        # we proceed looking behind
+        for i, spell in enumerate(spells[:-1]):
+            rel = possession.loc[possession['spell'] == spells[i+1], :]
+            rel_minus_1 = possession.loc[possession['spell'] == spells[i], :]
+            # If less than a second difference and same player we unify in the same spell
+            if (rel.index.values[0] - rel_minus_1.index.values[-1] < self.__hertz) and (rel_minus_1.iloc[0,1] ==
+                                                                                      rel.iloc[0,1]):
+                inds = np.arange(rel_minus_1.index.values[0], rel.index.values[-1]+1)
+                possession.loc[inds, 'player'] = rel.iloc[0,1]
+                possession.loc[inds, 'team'] = rel.iloc[0,0]
+                possession.loc[inds, 'spell'] = rel.iloc[0,-1]
+        # Now we can safely 'delete' the P
+        possession.loc[possession['spell'] == -99, 'P'] = np.nan
+
+        # Modify the pass release
+        for p in possession['player'].unique():
+            relevant_events = events.loc[
+                (events['player'] == p) & (events['event'].isin(voluntary_toss))]
+            relevant_events = relevant_events.astype({'frame':np.int})
+            spells = possession.loc[possession['player'] == p, 'spell'].unique()
+            for spell in spells:
+                relevant = possession.loc[possession['spell'] == spell,:]
+                dist_spell = distances[int(relevant.iloc[0, 0])].loc[relevant.index, p]
+                going_away = dist_spell - dist_spell.shift(1)
+                # If the ball is moving away from the player
+                if going_away.iloc[-1] > min_speed_passage:
+                    going_away.loc[going_away < min_speed_passage] = -0.1
+                    going_away = np.sign(going_away)
+                    going_away = going_away != going_away.shift(1)
+                    going_away = going_away.cumsum()
+                    # inds corresponds the frames where the spell happens and the ball is moving away quickly
+                    inds = going_away[going_away == going_away.iloc[-1]].index
+                    # let's check if there is a voluntary toss around the indices we found
+                    if np.abs((relevant_events['frame'] - inds.values[0])).min() < (self.__hertz*(max_recaliber/2)):
+                        possession.loc[inds, ['player', 'team', 'P']] = np.nan
+                        possession.loc[inds, ['spell']] = -99
+                        if modify_event:
+                            rel_ind = np.abs((relevant_events['frame'] - inds.min())).idxmin()
+                            events.loc[rel_ind, 'recalibrated'] = True
+                            events.loc[rel_ind, 'frame'] = inds.values[0]
+
+        # Check we have not changed the time-orders of the re-calibrated events
+        if any(events.loc[events.recalibrated, 'frame'] - events.loc[events.recalibrated, 'frame'].shift(1) <= 0):
+            # Find those events whose order has been changed
+            un_ordered = (events.loc[events.recalibrated, 'frame'] - events.loc[
+                events.recalibrated, 'frame'].shift(1)) <= 0
+            un_ordered = un_ordered | ((events.loc[events.recalibrated, 'frame'] - events.loc[
+                events.recalibrated, 'frame'].shift(-1)) >= 0)
+            # We default back to the initial frames for the un_ordered events and set recalibrated to False
+            events.loc[(events.recalibrated) & (un_ordered), 'frame'] = events.loc[(events.recalibrated) & (un_ordered), 'frame_safe']
+            events.loc[(events.recalibrated) & (un_ordered), 'recalibrated'] = False
+
+        # Re-calibrate the entire event dataset based on the re-calibrated events
+        recalibrated_inds = events.loc[events.recalibrated].index.values
+        for i, recalibrated_ind in enumerate(recalibrated_inds[:-1]):
+            # We effectively skip the kick-offs and possibly other events at the end/beginning of periods
+            ind_0 = recalibrated_inds[i]
+            ind_1 = recalibrated_inds[i+1]
+            # Check we are in the same period
+            if events.loc[ind_0, 'period'] == events.loc[ind_1, 'period']:
+                # Take the mean distance between re-calibrated frames as the frame of the events in between
+                diff_0 = .5*(events.loc[ind_0, 'frame'] - events.loc[ind_0, 'frame_safe'])
+                diff_1 = .5*(events.loc[ind_1, 'frame'] - events.loc[ind_1, 'frame_safe'])
+                events.loc[(ind_0+1):(ind_1-1), 'frame'] = np.round_(events.loc[(ind_0+1):(ind_1-1), 'frame_safe'] + diff_0 + diff_1)
+        events = events.astype({'frame':np.int})
+        # Take out the 'recalibrated' and  'frame_safe' column
+        events = events.iloc[:,:-2]
+
+        if filter_spells:
+            # We take note of the spells ending and beginning the halves. These may not contain events
+            periods_frame = [range(1,6), [range(half-5, half+5) for half in self.__halves_frame],
+                             range(possession.index.values[-1]-5, possession.index.values[-1])]
+            periods_frame = list(pd.core.common.flatten(periods_frame))
+            # These are the spells we will not filter because they are very close to the end/start of periods
+            period_spell = possession.loc[periods_frame, 'spell'].unique()
+            # We may be repeating -99 in this vector, but that's irrelevant
+            period_spell = np.append(period_spell, -99)
+            filtered_out = []
+            # We check if there is an event associated with the possession spell and filter for that
+            for spell_id, spell in possession.groupby('spell'):
+                if (spell_id not in period_spell):
+                    start = spell.index.values[0]
+                    end = spell.index.values[-1]
+                    p_id = spell.loc[start, 'player']
+                    n_relevant_rows = events.loc[(events['frame'] >= (start-filter_tol)) &
+                                                     (events['frame']<= (end+filter_tol)) &
+                                                     (events['player']==p_id),:].shape[0]
+                    if not n_relevant_rows:
+                        filtered_out.append(spell_id)
+
+            possession.loc[possession['spell'].isin(filtered_out), ['team', 'player', 'P']] = np.nan
+            possession.loc[filtered_out, ['spell']] = -99
+            possession.loc[possession['team'] == 0, 'team'] = self.__home_name
+            possession.loc[possession['team'] == 1, 'team'] = self.__away_name
+            self.__possession = possession

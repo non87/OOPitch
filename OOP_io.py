@@ -533,7 +533,7 @@ def read_chyronego(zip_file_path=None, f24_path=None, f7_path=None, tracking_pat
             ball_dt.loc[half:next_half, 'y'] = - ball_dt.loc[half:next_half, 'y']
 
     ball_point = ball_dt.apply(lambda x: create_Point(x['x'], x['y']), axis=1)
-    ball = Ball(positions=ball_point, hertz=hertz)
+    ball = Ball(positions=ball_point, hertz=hertz, in_play=ball_dt['state'])
     # Check colors
     if teams[home_team]['color'] is not None:
         colors = (teams[home_team]['color'], teams[away_team]['color'])
@@ -557,8 +557,7 @@ def read_chyronego(zip_file_path=None, f24_path=None, f7_path=None, tracking_pat
             spadl.loc[relevant, 'y_end'] = - spadl.loc[relevant, 'y_end']
     spadl['start'] = spadl.apply(lambda x: create_Point(x['x_start'], x['y_start']), axis=1)
     spadl['end'] = spadl.apply(lambda x: create_Point(x['x_end'], x['y_end']), axis=1)
-    spadl = spadl.drop(columns=['x_start', 'y_start', 'x_end', 'y_end'])
-    # Re order
+    # Re order and drop
     spadl = spadl[['frame', 'event', 'period', 'player', 'team', 'outcome', 'start', 'end', 'body_part', 'special']]
     # Create the pitch
     pitch = Pitch(pitch_dimen=pitch_dim, n_grid_cells_x=n_grid_cells_x)
@@ -567,12 +566,5 @@ def read_chyronego(zip_file_path=None, f24_path=None, f7_path=None, tracking_pat
                   home_name=teams[home_team]['name'], hertz=hertz, colors=colors)
     return(match)
 
-anonymized = True
-os.chdir('/home/non1987/Documents/football_analysis')
-zip_file_path = 'aalborg_recent.zip'
-n_grid_cells_x=50
-match = read_chyronego(zip_file_path, anonymized=True)
 
-goal_frames = match.events.loc[(match.events['event'] == 'shot') & (match.events['outcome'] == 'Success'), 'frame']
-frames_in_the_clip = range(goal_frames.iloc[0]-250, goal_frames.iloc[0]+50)
-match.save_match_clip(sequence=frames_in_the_clip, fpath='.', fname='goal_aarhus')
+
