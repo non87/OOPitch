@@ -1,6 +1,5 @@
 '''
-In this file, I extend shapely geometries to provide a simpler syntax for the operation commonly performed in football
-analytics.
+Extend shapely geometries to provide a simpler syntax for the operation commonly performed in football analytic
 '''
 from shapely.geometry import Point as pt
 from shapely.geometry import Polygon as pol
@@ -56,6 +55,8 @@ class Point(pt):
         else:
             return self.xy - other
 
+    def __mul__(self, other):
+        return(Point(self.xy * other))
 
     def __str__(self):
         return(f"Point at {str(self.xy)}")

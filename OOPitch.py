@@ -88,7 +88,7 @@ class ObejctOnPitch:
         # Velocity is a Dataframe containing the x,y components as two columns
         velocity_x = (self.__positions.x - self.__positions.shift(-1).x) * hertz
         # Last point has no velocity
-        # velocity_x.loc[self.__positions.index[-1]] = np.nan
+        velocity_x.loc[self.__positions.index[-1]] = np.nan
         velocity_y = (self.__positions.y - self.__positions.shift(-1).y) * hertz
         # Last point has no velocity
         velocity_y.loc[self.__positions.index[-1]] = np.nan
@@ -666,9 +666,9 @@ class Match:
         del state['_Match__event_orders'], state['_Match__event_geometry']
         self.__dict__.update(state)
 
-    def save(self, save_path):
+    def save(self, save_path, protocol=pkl.DEFAULT_PROTOCOL):
         with open(save_path, 'wb') as fl:
-            pkl.dump(self, fl)
+            pkl.dump(self, fl, protocol=protocol)
 
     @property
     def pitch(self):
@@ -757,6 +757,23 @@ class Match:
         :return: Sign of the attacking direction
         '''
         return(self.__attack_dir)
+
+    def invert_attack_directions(self):
+        '''
+        Invert the attacking directions in the Match object
+        '''
+        for team in [self.__home_tracking, self.__away_tracking]:
+            for p_id, p in team.items():
+                print(f"Inverting: {p_id}")
+                p._ObejctOnPitch__positions = p._ObejctOnPitch__positions.geometry.affine_transform([-1, 0, 0, -1, 0, 0])
+                # Velocity is registered in floats, so we can simply multiply by -1
+                p._ObejctOnPitch__velocity[['x','y']] = p._ObejctOnPitch__velocity[['x', 'y']] * (-1)
+        print("Inverting ball")
+        self.__ball._ObejctOnPitch__positions = \
+            self.__ball._ObejctOnPitch__positions.geometry.affine_transform([-1, 0, 0, -1, 0, 0])
+        self.__ball._ObejctOnPitch__velocity[['x', 'y']] = self.__ball._ObejctOnPitch__velocity[['x', 'y']] * (-1)
+        for k in self.__attack_dir.keys():
+            self.__attack_dir[k] = self.__attack_dir[k] * (-1)
 
     @property
     def possession(self):
@@ -1077,7 +1094,7 @@ class Match:
 
 
     def assign_possesion(self, sd=0.4, modify_event=True, min_speed_passage=0.12, max_recaliber=1.5,
-                         filter_spells=True, filter_tol=2):
+                         filter_spells=True, filter_tol=4):
         '''
         A simple function to find possession spells during the game based on the position of the ball and the players.
         Substantially select the closest player to the ball as the one having possession, but also filters for dead balls and
@@ -1093,35 +1110,41 @@ class Match:
         :param filter_tol:
         :return:
         '''
-        [range(half - 5, half + 5) for half in self.__halves_frame]
+        # [range(half - 5, half + 5) for half in self.__halves_frame]
         voluntary_toss = ['pass', 'clearance', 'short free-kick', 'crossed free-kick', 'throw-in', 'other free-kick',
-                          'cross', 'shot', 'crossed corner', 'free-kick shot', 'keeper punch']
+                          'cross', 'shot', 'crossed corner', 'free-kick shot', 'keeper punch', 'goal kick']
         if filter_tol <1: filter_tol = 1
 
-        distances =  [[], []]
-        ids = [[], []]
-        events = self.__events
-        for p_id, p in self.__away_tracking.items():
-            distances[0].append(self.__ball.positions.subtract(p.positions.astype('object')))
-            ids[0].append(p_id)
-
-        # Useful for re-calibrating the events' frame
+        events = self.__events.copy()
         events['recalibrated'] = False
         events['frame_safe'] = events['frame'].copy()
+        # Useful for re-calibrating the events' frame
 
         distances = [[], []]
         ids = [[], []]
+
+        # for i, team in enumerate([match._Match__home_tracking, match._Match__away_tracking]):
+        #     print(f"Calculating possession for team {[match._Match__home_name, match._Match__away_name][i]}")
+        #     for p_id, p in team.items():
+        #         print(f"Calculating possession for player {p_id}")
+        #         ids[i].append(p_id)
+        #         temp = pd.concat([p.positions, match._Match__ball.positions], axis=1)
+        #         temp.columns = ['player', 'ball']
+        #         temp = temp.loc[(~pd.isna(temp['player'])) & (~pd.isna(temp['ball']))]
+        #         distances[i].append(temp['ball'].distance(temp['player']))
+
 
         # Calculate the distance of every player from the ball at every frame. Takes time
         for i, team in enumerate([self.__home_tracking, self.__away_tracking]):
             print(f"Calculating possession for team {[self.__home_name, self.__away_name][i]}")
             for p_id, p in team.items():
-                print(f"Calculating the possession for player {p_id}")
+                print(f"Calculating possession for player {p_id}")
                 ids[i].append(p_id)
                 temp = pd.concat([p.positions, self.__ball.positions], axis=1)
                 temp.columns = ['player', 'ball']
                 temp = temp.loc[(~pd.isna(temp['player'])) & (~pd.isna(temp['ball']))]
-                distances[i].append(temp.apply(lambda x: x['ball'].distance(x['player']), axis=1))
+                distances[i].append(temp['ball'].distance(temp['player']))
+                # distances[i].append(temp.apply(lambda x: x['ball'].distance(x['player']), axis=1))
 
         ids_dic = {id_: i for ids_team in ids for i, id_ in enumerate( ids_team)}
         min_team = [[], []]
@@ -1155,6 +1178,7 @@ class Match:
         possession = pd.DataFrame({"team":min_dists[0], "player":min_dists[0], "P":min_dists[0]})
         possession.loc[(passes) | (~alive), 'team'] = np.nan
         possession.loc[(~passes) & (alive), 'team'] = team_possession
+        # Use fancy indexing in np to get the right player
         possession_player = min_team[(~passes) & (alive)].to_numpy()[np.arange(team_possession.shape[0]), team_possession.to_numpy()]
         possession_player = pd.Series(possession_player, index=min_team[(~passes) & (alive)].index)
         possession.loc[(~passes) & (alive), 'player'] = possession_player
@@ -1168,7 +1192,6 @@ class Match:
         # posses_ind = min_dists.index[~passes]
         possession['spell'] = (possession.player.fillna('---') != possession.player.fillna('---').shift(1)).astype('int').cumsum()
         possession.loc[passes, 'spell'] = -99
-        # The types of events that indicate a players willingly getting rid of the ball
         # Do not count -99
         spells = np.sort(possession['spell'].unique())
         spells = spells[spells != -99]
@@ -1180,6 +1203,8 @@ class Match:
             # If less than a second difference and same player we unify in the same spell
             if (rel.index.values[0] - rel_minus_1.index.values[-1] < self.__hertz) and (rel_minus_1.iloc[0,1] ==
                                                                                       rel.iloc[0,1]):
+            # if (rel.index.values[0] - rel_minus_1.index.values[-1] < match.hertz) and (rel_minus_1.iloc[0,1] ==
+            #                                                                           rel.iloc[0,1]):
                 inds = np.arange(rel_minus_1.index.values[0], rel.index.values[-1]+1)
                 possession.loc[inds, 'player'] = rel.iloc[0,1]
                 possession.loc[inds, 'team'] = rel.iloc[0,0]
@@ -1207,15 +1232,17 @@ class Match:
                     inds = going_away[going_away == going_away.iloc[-1]].index
                     # let's check if there is a voluntary toss around the indices we found
                     if np.abs((relevant_events['frame'] - inds.values[0])).min() < (self.__hertz*(max_recaliber/2)):
+                    # if np.abs((relevant_events['frame'] - inds.values[0])).min() < (match.hertz * (max_recaliber / 2)):
                         possession.loc[inds, ['player', 'team', 'P']] = np.nan
                         possession.loc[inds, ['spell']] = -99
+                        # Recalibrate events if needed
                         if modify_event:
                             rel_ind = np.abs((relevant_events['frame'] - inds.min())).idxmin()
                             events.loc[rel_ind, 'recalibrated'] = True
                             events.loc[rel_ind, 'frame'] = inds.values[0]
 
         # Check we have not changed the time-orders of the re-calibrated events
-        if any(events.loc[events.recalibrated, 'frame'] - events.loc[events.recalibrated, 'frame'].shift(1) <= 0):
+        if any((events.loc[events.recalibrated, 'frame'] - events.loc[events.recalibrated, 'frame'].shift(1)) <= 0):
             # Find those events whose order has been changed
             un_ordered = (events.loc[events.recalibrated, 'frame'] - events.loc[
                 events.recalibrated, 'frame'].shift(1)) <= 0
@@ -1243,6 +1270,7 @@ class Match:
 
         if filter_spells:
             # We take note of the spells ending and beginning the halves. These may not contain events
+            # match._Match__halves_frame
             periods_frame = [range(1,6), [range(half-5, half+5) for half in self.__halves_frame],
                              range(possession.index.values[-1]-5, possession.index.values[-1])]
             periods_frame = list(pd.core.common.flatten(periods_frame))
@@ -1264,7 +1292,8 @@ class Match:
                         filtered_out.append(spell_id)
 
             possession.loc[possession['spell'].isin(filtered_out), ['team', 'player', 'P']] = np.nan
-            possession.loc[filtered_out, ['spell']] = -99
+            possession.loc[pd.isna(possession['player']), ['spell']] = -99
             possession.loc[possession['team'] == 0, 'team'] = self.__home_name
             possession.loc[possession['team'] == 1, 'team'] = self.__away_name
             self.__possession = possession
+            self.__events = events

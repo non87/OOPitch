@@ -22,11 +22,13 @@ import xml.etree.ElementTree as ET
 import pandas as pd
 import numpy as np
 from collections import defaultdict
+import pickle as pkl
 
 
 meters_per_yard = 0.9144  # unit conversion from yards to meters
 metrica_hertz = 25  # The frequency per second of the tracking data in Metrica
 opta_hertz = 25
+
 
 
 def create_Point(x, y):
@@ -69,6 +71,17 @@ def change_direction(x):
             return np.nan
 
 
+def read_Match(data_path):
+    '''
+    Read a saved Match object
+
+    :param data_path: the path to the match object
+    :param protocol: the pickle protocol
+    :return:
+    '''
+    with open(data_path, 'rb') as fl:
+        match = pkl.load(fl)
+    return match
 
 def read_metrica_tracking(data_path, teamname, get_ball=True, pitch_dim=(106, 68)):
     '''
@@ -309,6 +322,9 @@ def parse_f24_opta(f24, pitch_dim=(106, 68), teams=None, periods=None, players=N
     spadl = f24_2_SPDAL(f24, periods=periods, hertz=hertz)
     spadl = spadl.astype({'team':str, 'player':str, 'frame':int})
     spadl['player'] = 'p' + spadl['player']
+    # For most fouls, the special column contain the player fouled
+    spadl.loc[(spadl.event == 'foul') & (spadl.outcome == 'Failure') & (~pd.isna(spadl.special)), 'special'] = \
+        'p' + spadl.loc[(spadl.event == 'foul') & (spadl.outcome == 'Failure') & (~pd.isna(spadl.special)), 'special']
     spadl['team'] = 't' + spadl['team']
     if teams is None:
         home_team = spadl["team"].unique()[0]
@@ -340,6 +356,9 @@ def parse_f24_opta(f24, pitch_dim=(106, 68), teams=None, periods=None, players=N
     ends = [- spadl.loc[spadl['team'] == home_team, ['x_end', 'y_end']] @ to_meter]
     ends.append(spadl.loc[spadl['team'] == away_team, ['x_end', 'y_end']] @ to_meter)
     spadl[['x_end', 'y_end']] = pd.concat(ends)
+    # Change team name
+    if not anonymized:
+        for team in teams.values():  spadl.loc[spadl['team'] == team['id'], 'team'] = team['name']
     return(spadl)
 
 def parse_tracab(trac_dt, periods, teams, players_id, spadl=None, anonymized=False):
@@ -484,7 +503,7 @@ def read_chyronego(zip_file_path=None, f24_path=None, f7_path=None, tracking_pat
     teams, players = parse_f7_opta(f7, anonymized=anonymized)
     home_team = 0 if teams[0]['venue'] == 'home' else 1
     away_team = int(np.abs(home_team - 1))
-    spadl = parse_f24_opta(f24, teams=teams, pitch_dim=pitch_dim, periods=periods)
+    spadl = parse_f24_opta(f24, teams=teams, pitch_dim=pitch_dim, periods=periods, anonymized=anonymized, players=players)
     players_dt, ball_dt = parse_tracab(trac_dt, periods, teams, players, anonymized=anonymized, spadl=spadl)
     # Create Points instead from x, y columns coordinate.
     id_k = 'id' if not anonymized else 'anon_id'
@@ -544,17 +563,17 @@ def read_chyronego(zip_file_path=None, f24_path=None, f7_path=None, tracking_pat
     spadl['frame'] = re_frame
     spadl = spadl.set_index(np.arange(1, spadl.shape[0] + 1))
     # Change attack side for the events
-    for i, half in enumerate(halves):
-        if i % 2 == 0:
-            if i < len(halves) - 1:
-                next_half = halves[i + 1] - 1
-            else:
-                next_half = np.inf
-            relevant = (spadl['frame']>=half) & (spadl['frame']<=next_half)
-            spadl.loc[relevant, 'x_start'] = - spadl.loc[relevant, 'x_start']
-            spadl.loc[relevant, 'y_start'] = - spadl.loc[relevant, 'y_start']
-            spadl.loc[relevant, 'x_end'] = - spadl.loc[relevant, 'x_end']
-            spadl.loc[relevant, 'y_end'] = - spadl.loc[relevant, 'y_end']
+    # for i, half in enumerate(halves):
+    #     if i % 2 == 0:
+    #         if i < len(halves) - 1:
+    #             next_half = halves[i + 1] - 1
+    #         else:
+    #             next_half = np.inf
+    #         relevant = (spadl['frame']>=half) & (spadl['frame']<=next_half)
+    #         spadl.loc[relevant, 'x_start'] = - spadl.loc[relevant, 'x_start']
+    #         spadl.loc[relevant, 'y_start'] = - spadl.loc[relevant, 'y_start']
+    #         spadl.loc[relevant, 'x_end'] = - spadl.loc[relevant, 'x_end']
+    #         spadl.loc[relevant, 'y_end'] = - spadl.loc[relevant, 'y_end']
     spadl['start'] = spadl.apply(lambda x: create_Point(x['x_start'], x['y_start']), axis=1)
     spadl['end'] = spadl.apply(lambda x: create_Point(x['x_end'], x['y_end']), axis=1)
     # Re order and drop

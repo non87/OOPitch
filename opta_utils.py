@@ -144,6 +144,9 @@ def parse_passages(event, event_type = None, qual_leaf = None, quals = None):
     if 107 in quals:
         body_part = np.nan
         spadl_event = 'throw-in'
+    elif 124 in quals:
+        body_part = 'either feet'
+        spadl_event = 'goal kick'
     # Free kick
     elif 5 in quals:
         # crossed free kick
@@ -151,12 +154,17 @@ def parse_passages(event, event_type = None, qual_leaf = None, quals = None):
             spadl_event = 'crossed free-kick'
         # Passes free kicks
         else:
-            assert 212 in quals
-            # short free kick
-            if float(qual_leaf[212].attrib['value']) < 10:
-                spadl_event = 'short free-kick'
-            # Other free kick
-            else:
+            # TODO check match lyngby_1
+            try:
+                assert 212 in quals
+                # short free kick
+                if float(qual_leaf[212].attrib['value']) < 10:
+                    spadl_event = 'short free-kick'
+                # Other free kick
+                else:
+                    spadl_event = 'other free-kick'
+            except AssertionError:
+                print(f"Event {event.attrib['id']} is a free-kick without length")
                 spadl_event = 'other free-kick'
     # Corner
     elif 6 in quals:
@@ -302,14 +310,32 @@ def add_dribbles(spadl):
     spadl = spadl.sort_values(['frame']).reset_index(drop=True)
     return spadl
 
+def collapse_fouls(spadl):
+    '''
+    F24 presents fouls twice, once for the player commiting the foul and once for the player fouled.
+    This function unifies fouls in one event and save the fouled player in the "special" column
+    '''
+    successes = spadl.loc[(spadl.event == 'foul') & (spadl.outcome == 'Success'), 'frame']
+    failures = spadl.loc[(spadl.event == 'foul') & (spadl.outcome == 'Failure'), ['frame']]
+
+    for ind, success in successes.iteritems():
+        if (np.abs(failures - success)).min()[0] <= 2:
+            p_id = spadl.loc[ind, 'player']
+            fail_id = (np.abs(failures - success)).idxmin()
+            spadl.loc[fail_id, 'special'] = p_id
+
+    spadl = spadl.drop(index=successes.index)
+    return(spadl)
+
+
 def f24_2_SPDAL(f24, periods=None, hertz=None, aligning_strategy='period_specific'):
     '''
     This function translates the f24 xml to a pandas dataframe in the SPADL+ format. The logic of the translation is
     documented into a separate document. I added few categories to SPADL, that justifies the "+".
 
     :param f24: An xml.etree.ElementTree object, containing an Opta f24 file
-    :param periods: a dictionary containing the beginning and end frome for each period, from the meta.xml file
-    :param aligning_strategy: Given a periods dictionary, how to align the timestamp in the f24 to the fram in the tracking.
+    :param periods: a dictionary containing the beginning and end frame for each period, from the meta.xml file
+    :param aligning_strategy: Given a periods dictionary, how to align the timestamp in the f24 to the frame in the tracking.
         Possible values: 'period_specific' (align the start of each period), 'mean' (take the mean of the possible alignments)
         Default: 'period_specific' should minimize discrepancies at the beginning of the halves, but get worst as the half
         progresses
@@ -324,13 +350,11 @@ def f24_2_SPDAL(f24, periods=None, hertz=None, aligning_strategy='period_specifi
     # it is necessary to keep track of end/ start period events because they are actually repeated in the f24!
     previous_event_end = False
     previous_event_start = False
-    timestamps = []
     spadl = [[] for i in range(12)]
     print("Converting Events")
     for event in f24.findall('Event'):
         event_type = int(event.attrib['type_id'])
         if event_type in relevant:
-            # if event_type in [30, 32, 37]: print("HEY")
             # print(f"relevant: {event_type}")
             # Start collecting data on the event
             timestamp = from_format(event.attrib['timestamp'], "YYYY-MM-DDTHH:mm:ss.SSS").timestamp()
@@ -338,7 +362,7 @@ def f24_2_SPDAL(f24, periods=None, hertz=None, aligning_strategy='period_specifi
             # I do not register those
             try:
                 player = event.attrib['player_id'] if event_type not in [30, 32, 37] else np.nan
-            except:
+            except KeyError:
                 print(f"An event with no players. Id: {event.attrib['id']}")
                 player = np.nan
                 # We flag this
@@ -378,12 +402,17 @@ def f24_2_SPDAL(f24, periods=None, hertz=None, aligning_strategy='period_specifi
             elif event_type in [10, 11, 41, 52, 53, 54]:
                 spadl_event, x_end, y_end, outcome, body_part, special = \
                         parse_keeper(event, event_type=event_type, quals=quals, qual_leaf=qual_leaf)
-                previous_event_period = False
 
             # Foul
             elif event_type == 4:
                 x_end, y_end, body_part, special = np.nan, np.nan, np.nan, np.nan
-                outcome = "Failure"
+                # Failure corresponds to commited fouls. Success corresponds to fouled players
+                # Later we will collapse both outcomes in one event. For now, it is convenient to register
+                # separate events
+                if int(event.attrib['outcome']) == 0:
+                    outcome = "Failure"
+                else:
+                    outcome = "Success"
                 spadl_event = 'foul'
 
             # Tackle
@@ -402,7 +431,11 @@ def f24_2_SPDAL(f24, periods=None, hertz=None, aligning_strategy='period_specifi
 
             # Clearance
             elif (event_type == 12):
-                x_end, y_end = float(qual_leaf[140].attrib['value']), float(qual_leaf[141].attrib['value'])
+                try:
+                    x_end, y_end = float(qual_leaf[140].attrib['value']), float(qual_leaf[141].attrib['value'])
+                except KeyError:
+                    x_end, y_end = np.nan, np.nan
+                    print(f"Event {event.attrib['id']} is a clearance without end point.")
                 # Header are signaled...I imagine if no body part qualifier the clearance was done with feet
                 special, body_part = np.nan, 'either feet'
                 if 15 in quals:
@@ -471,6 +504,7 @@ def f24_2_SPDAL(f24, periods=None, hertz=None, aligning_strategy='period_specifi
     (basically, the error distribution has 0 skewness).
     However, this can results in events that are on average best aligned, but singularly off by a second (25 frames)
     The default strategy we use is to align the first frame of each halves.
+    The function set_possession() helps with alignment
     '''
     print("Calculating Frames")
     assert len(period_boundaries) in [4,8]
@@ -514,6 +548,8 @@ def f24_2_SPDAL(f24, periods=None, hertz=None, aligning_strategy='period_specifi
                                                                 'period'] == period, 'frame'] - interval_lenght_in_frame
     # Add dribbling
     spadl = add_dribbles(spadl)
+    # Collapse fouls
+    spadl = collapse_fouls(spadl)
     return(spadl)
 
 def read_f24(f24_file):
